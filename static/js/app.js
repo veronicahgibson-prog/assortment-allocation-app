@@ -1348,7 +1348,8 @@
         let html = `<h4 style="margin:0 0 6px 0;font-size:.9rem">
             <i class="fas fa-boxes-stacked"></i> Supplier DC Assignments</h4>
             <p class="vendor-dc-help">Select the DC buttons for each supplier. Hover over a DC number to see its name.</p>
-            <div class="vendor-dc-list">`;
+            <div class="table-container vendor-dc-table-wrap"><table class="detail-table vendor-dc-table">
+            <thead><tr><th>Matched THD Key</th><th>Supplier</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
         matches.forEach((m, matchIndex) => {
             const isOther = (m.VENDOR || "").toUpperCase() === "OTHER";
             if (!m._initialDcList) m._initialDcList = parseVendorDcs(m.DC_LIST).join(", ");
@@ -1356,20 +1357,19 @@
             const selectedDcs = parseVendorDcs(m.DC_LIST);
             const initialDcs = parseVendorDcs(m._initialDcList);
             const names = parseVendorNames(m._initialDcNames);
-            html += `<div class="vendor-dc-card"><div class="vendor-dc-heading">
-                <strong>${m.SUPPLIER}${isOther
+            html += `<tr><td style="text-align:right">${fmtNum(m.SKU_COUNT)}</td>
+                <td><strong>${m.SUPPLIER}${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
-                    : ""}</strong>
-                <span class="vendor-dc-meta">${fmtNum(m.SKU_COUNT)} SKU(s) · ${selectedDcs.length} matched DC${selectedDcs.length === 1 ? "" : "s"}</span></div>
-                <div class="vendor-dc-buttons">`;
+                    : ""}</strong><br><span class="vendor-dc-meta">${m.VENDOR || "—"}</span></td>
+                <td class="vendor-dc-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
             initialDcs.forEach((dcNbr, dcIndex) => {
                 const name = vendorDcName(dcNbr, names, dcIndex);
                 html += `<button type="button" class="dc-toggle-btn vendor-dc-btn${selectedDcs.includes(dcNbr) ? " active" : ""}"
                     title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-dc-nbr="${dcNbr}">${dcNbr}</button>`;
             });
-            html += `</div></div>`;
+            html += `</div></td></tr>`;
         });
-        html += `</div><div class="vendor-dc-total">Total: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))} SKU(s)</div>`;
+        html += `</tbody><tfoot><tr><td colspan="4" class="vendor-dc-total">Total matched THD Keys: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))}</td></tr></tfoot></table></div>`;
         box.innerHTML = html;
         box.querySelectorAll(".vendor-dc-btn").forEach(button => {
             button.addEventListener("click", () => toggleVendorDc(
