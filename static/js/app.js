@@ -1446,13 +1446,14 @@
             const selectedDcs = parseVendorDcs(m.DC_LIST);
             const initialDcs = parseVendorDcs(m._initialDcList);
             const names = parseVendorNames(m._initialDcNames);
-            html += `<tr><td style="text-align:right">${fmtNum(m.SKU_COUNT)}</td>
-                <td><strong>${m.SUPPLIER}${isOther
+            const matchedVendor = (m.VENDOR || m.SUPPLIER || "").toUpperCase();
+            html += `<tr><td style="text-align:right"><div>${fmtNum(m.SKU_COUNT)}</div>
+                <button type="button" class="btn btn-sm btn-secondary vendor-sku-toggle" data-match-index="${matchIndex}">
+                    <i class="fas fa-chevron-${vendorSkuExpanded.has(matchIndex) ? "up" : "down"}"></i> ${vendorSkuExpanded.has(matchIndex) ? "Hide" : "View"} SKUs
+                </button></td>
+                <td><strong>${matchedVendor}${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
-                    : ""}</strong><br><span class="vendor-dc-meta">${m.VENDOR || "—"}</span>
-                    <button type="button" class="btn btn-sm btn-secondary vendor-sku-toggle" data-match-index="${matchIndex}">
-                        <i class="fas fa-chevron-${vendorSkuExpanded.has(matchIndex) ? "up" : "down"}"></i> ${vendorSkuExpanded.has(matchIndex) ? "Hide" : "View"} SKUs
-                    </button></td>
+                    : ""}</strong><br><span class="vendor-dc-meta">Uploaded supplier: ${m.SUPPLIER || "—"}</span></td>
                 <td class="vendor-dc-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
             initialDcs.forEach((dcNbr, dcIndex) => {
                 const name = vendorDcName(dcNbr, names, dcIndex);
