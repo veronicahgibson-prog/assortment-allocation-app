@@ -1026,6 +1026,41 @@ def api_match_vendor_strategy():
 
 # ── Section 4b: DFC Cost Model Submission ────────────────────────────
 
+@app.route("/api/vendor_skus")
+def api_vendor_skus():
+    """Return one supplier's validated SKU rows for the expandable drill-down."""
+    df = _upload_cache.get("df")
+    supplier = request.args.get("supplier", "").strip()
+    if df is None or not supplier:
+        return jsonify({"error": "A validated upload and supplier are required."}), 400
+    if "SUPPLIER" not in df.columns:
+        return jsonify({"error": "The validated upload has no SUPPLIER column."}), 400
+
+    try:
+        page = max(int(request.args.get("page", 1)), 1)
+        page_size = min(max(int(request.args.get("page_size", 50)), 1), 100)
+    except ValueError:
+        return jsonify({"error": "page and page_size must be numbers."}), 400
+
+    supplier_mask = df["SUPPLIER"].fillna("").astype(str).str.strip().str.upper() == supplier.upper()
+    rows_df = df.loc[supplier_mask].copy()
+    key_cols = [c for c in _determine_thd_key(df, _upload_cache.get("includes_imports", False)) if c in df.columns]
+    rows_df["THD_KEY"] = rows_df[key_cols].fillna("__NULL__").astype(str).agg("|".join, axis=1)
+    total = len(rows_df)
+    start = (page - 1) * page_size
+
+    rows = []
+    for _, row in rows_df.iloc[start:start + page_size].iterrows():
+        item = {}
+        for col in ["THD_KEY", "THD_SKU_NBR", "SISTER_SKU_NBR", "SKU_DESC", "BP", "BUY_UNITS", "WAVE_1", "WAVE_2", "WAVE_3", "WAVE_4", "WAVE_5"]:
+            if col not in row.index:
+                continue
+            value = row[col]
+            item[col] = "" if pd.isna(value) else str(value)
+        rows.append(item)
+    return jsonify({"rows": rows, "page": page, "page_size": page_size, "total": total, "pages": (total + page_size - 1) // page_size})
+
+
 @app.route("/api/cost_model_preview", methods=["POST"])
 def api_cost_model_preview():
     """Return SKU breakdown by sister flag for charts + table preview."""

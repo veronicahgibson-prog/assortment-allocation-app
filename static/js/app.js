@@ -1347,6 +1347,82 @@
         renderVendorSupplierSummary(vendorMatches);
     }
 
+    let vendorSkuExpanded = new Set();
+
+    function vendorSkuDcs(match, row) {
+        const overrides = match.SKU_OVERRIDES || {};
+        return parseVendorDcs(overrides[row.THD_KEY] || match.DC_LIST);
+    }
+
+    async function toggleVendorSkuRows(matchIndex) {
+        if (vendorSkuExpanded.has(matchIndex)) {
+            vendorSkuExpanded.delete(matchIndex);
+        } else {
+            vendorSkuExpanded.add(matchIndex);
+        }
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
+    async function loadVendorSkuRows(matchIndex, page) {
+        const match = vendorMatches[matchIndex];
+        const container = $(`#vendor-skus-${matchIndex}`);
+        if (!match || !container) return;
+        container.innerHTML = '<div class="vendor-sku-loading">Loading SKU details...</div>';
+        try {
+            const result = await api(`/api/vendor_skus?supplier=${encodeURIComponent(match.SUPPLIER)}&page=${page}&page_size=50`);
+            if (result.error) throw new Error(result.error);
+            match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
+            const defaultDcs = parseVendorDcs(match.DC_LIST);
+            let html = `<table class="detail-table vendor-sku-table"><thead><tr>
+                <th>THD SKU</th><th>Description</th><th>BP</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
+            result.rows.forEach(row => {
+                const selectedDcs = vendorSkuDcs(match, row);
+                html += `<tr><td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.BP || "—"}</td>
+                    <td class="vendor-sku-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
+                defaultDcs.forEach((dcNbr, dcIndex) => {
+                    const name = vendorDcName(dcNbr, parseVendorNames(match._initialDcNames), dcIndex);
+                    html += `<button type="button" class="dc-toggle-btn vendor-dc-btn vendor-sku-dc-btn${selectedDcs.includes(dcNbr) ? " active" : ""}"
+                        title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-sku-key="${row.THD_KEY}" data-dc-nbr="${dcNbr}">${dcNbr}</button>`;
+                });
+                html += `</div>${match.SKU_OVERRIDES[row.THD_KEY] ? '<span class="vendor-sku-override">Override</span>' : ""}</td></tr>`;
+            });
+            html += `</tbody></table><div class="vendor-sku-footer">Page ${result.page} of ${result.pages || 1} · ${result.total} SKU(s)`;
+            if (result.pages > 1) {
+                html += `<button type="button" class="btn btn-sm btn-secondary vendor-sku-next" data-match-index="${matchIndex}" data-page="${result.page + 1}" ${result.page >= result.pages ? "disabled" : ""}>Next</button>`;
+            }
+            html += `</div>`;
+            container.innerHTML = html;
+            container.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
+                button.addEventListener("click", () => toggleVendorSkuDc(
+                    Number(button.dataset.matchIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
+                ));
+            });
+            container.querySelector(".vendor-sku-next")?.addEventListener("click", event => {
+                loadVendorSkuRows(matchIndex, Number(event.currentTarget.dataset.page));
+            });
+        } catch (error) {
+            container.innerHTML = `<div class="vendor-sku-loading">Unable to load SKU details: ${error.message}</div>`;
+        }
+    }
+
+    function toggleVendorSkuDc(matchIndex, skuKey, dcNbr) {
+        const match = vendorMatches[matchIndex];
+        if (!match) return;
+        match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
+        const selected = parseVendorDcs(match.SKU_OVERRIDES[skuKey] || match.DC_LIST);
+        if (selected.length === 1 && selected[0] === dcNbr) {
+            toast("Each SKU must have at least one DC selected", "error");
+            return;
+        }
+        const next = selected.includes(dcNbr) ? selected.filter(dc => dc !== dcNbr) : [...selected, dcNbr];
+        next.sort((a, b) => a - b);
+        const defaults = parseVendorDcs(match.DC_LIST);
+        if (next.join(",") === defaults.join(",")) delete match.SKU_OVERRIDES[skuKey];
+        else match.SKU_OVERRIDES[skuKey] = next;
+        const page = Number($(`#vendor-skus-${matchIndex} .vendor-sku-next`)?.dataset.page || 1) - 1 || 1;
+        loadVendorSkuRows(matchIndex, page);
+    }
+
     // Per-supplier rollup of the vendor-strategy match: SKU count comes from
     // the uploaded template, DC count/list from the matched VENDOR_ALIGNED_STRATEGY
     // row. Suppliers falling back to the "OTHER" vendor are flagged, since their
@@ -1373,7 +1449,10 @@
             html += `<tr><td style="text-align:right">${fmtNum(m.SKU_COUNT)}</td>
                 <td><strong>${m.SUPPLIER}${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
-                    : ""}</strong><br><span class="vendor-dc-meta">${m.VENDOR || "—"}</span></td>
+                    : ""}</strong><br><span class="vendor-dc-meta">${m.VENDOR || "—"}</span>
+                    <button type="button" class="btn btn-sm btn-secondary vendor-sku-toggle" data-match-index="${matchIndex}">
+                        <i class="fas fa-chevron-${vendorSkuExpanded.has(matchIndex) ? "up" : "down"}"></i> ${vendorSkuExpanded.has(matchIndex) ? "Hide" : "View"} SKUs
+                    </button></td>
                 <td class="vendor-dc-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
             initialDcs.forEach((dcNbr, dcIndex) => {
                 const name = vendorDcName(dcNbr, names, dcIndex);
@@ -1381,6 +1460,9 @@
                     title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-dc-nbr="${dcNbr}">${dcNbr}</button>`;
             });
             html += `</div></td></tr>`;
+            if (vendorSkuExpanded.has(matchIndex)) {
+                html += `<tr class="vendor-sku-detail-row"><td colspan="4"><div id="vendor-skus-${matchIndex}" class="vendor-sku-details"></div></td></tr>`;
+            }
         });
         html += `</tbody><tfoot><tr><td colspan="4" class="vendor-dc-total">Total matched THD Keys: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))}</td></tr></tfoot></table></div>`;
         box.innerHTML = html;
@@ -1389,6 +1471,10 @@
                 Number(button.dataset.matchIndex), Number(button.dataset.dcNbr)
             ));
         });
+        box.querySelectorAll(".vendor-sku-toggle").forEach(button => {
+            button.addEventListener("click", () => toggleVendorSkuRows(Number(button.dataset.matchIndex)));
+        });
+        vendorSkuExpanded.forEach(matchIndex => loadVendorSkuRows(matchIndex, 1));
     }
 
     let availableDcOptions = [];
@@ -1993,6 +2079,7 @@
 
         if (selectedStrategy === "VENDOR_ALIGNED") {
             body.sku_grp = $("#stratSkuGrp")?.value?.trim() || "";
+            body.vendor_matches = vendorMatches;
         } else if (selectedStrategy === "DC_SELECTION" || selectedStrategy === "SINGLE_DC" || selectedStrategy === "MULTI_DC") {
             const dynamicMode = multiDcDynamicSelected && includesImports;
             if (dynamicMode) {

@@ -300,6 +300,46 @@ code {
 .vendor-dc-total {
   margin-top: 8px; font-weight: 600;
 }
+.vendor-sku-toggle {
+  margin-top: 6px;
+  font-size: .72rem;
+}
+.vendor-sku-detail-row td {
+  padding: 8px 12px 12px;
+  background: #f8f8f8;
+}
+.vendor-sku-details {
+  overflow-x: auto;
+}
+.vendor-sku-table {
+  font-size: .78rem;
+  background: #fff;
+}
+.vendor-sku-table th:nth-child(3),
+.vendor-sku-table td:nth-child(3),
+.vendor-sku-table th:nth-child(4),
+.vendor-sku-table td:nth-child(4) {
+  text-align: right;
+  white-space: nowrap;
+}
+.vendor-sku-table td:nth-child(5) {
+  min-width: 240px;
+}
+.vendor-sku-table .vendor-dc-btn {
+  width: 44px; height: 32px; font-size: .72rem;
+}
+.vendor-sku-loading {
+  padding: 10px;
+  color: var(--hd-medium-gray);
+  font-size: .8rem;
+}
+.vendor-sku-footer {
+  display: flex; align-items: center; gap: 10px;
+  padding-top: 8px; color: var(--hd-medium-gray); font-size: .78rem;
+}
+.vendor-sku-override {
+  margin-left: 8px; color: var(--hd-orange); font-size: .72rem; font-weight: 600;
+}
 
 .dc-filter-list {
   display: flex; flex-direction: column; gap: 6px;
