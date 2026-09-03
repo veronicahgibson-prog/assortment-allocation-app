@@ -81,24 +81,22 @@
                         </label>
                     </div>
                 </div>
+                <div id="containerSizeStep1" style="display:none;min-width:220px">
+                    <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Container Size (cuft)</label>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <select id="containerSizeSelect" style="padding:6px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
+                            <option value="2390" selected>2390 (40ft standard)</option>
+                            <option value="3000">3000 (40ft high-cube)</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                        <input id="containerSizeCustom" type="number" min="1" placeholder="cuft" style="display:none;width:80px;padding:6px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
+                    </div>
+                </div>
                 <button class="btn btn-secondary" id="btnCheckPriorStrategy">
                     <i class="fas fa-clock-rotate-left"></i> Check Last Year's Strategy
                 </button>
             </div>
             <div id="priorStrategySection" style="display:none;margin-bottom:20px;padding:14px 16px;background:#f5f5f5;border-radius:6px"></div>
-
-            <!-- Container size (imports only) -->
-            <div id="containerSizeStep1" style="display:none;margin-bottom:20px;padding:12px 16px;background:#f5f5f5;border-radius:6px">
-                <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Container Size (cuft):</label>
-                <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
-                    <select id="containerSizeSelect" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
-                        <option value="2390" selected>2390 (40ft standard)</option>
-                        <option value="3000">3000 (40ft high-cube)</option>
-                        <option value="custom">Custom</option>
-                    </select>
-                    <input id="containerSizeCustom" type="number" min="1" placeholder="cuft" style="display:none;width:80px;padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
-                </div>
-            </div>
 
             <!-- Template Download Section -->
             <div style="margin-top:20px;padding:16px;background:#eef6ff;border:1px solid #b6d4fe;border-radius:8px">
