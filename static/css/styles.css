@@ -255,6 +255,38 @@ code {
   color: #fff;
 }
 
+.vendor-dc-help {
+  margin: 0 0 10px;
+  color: var(--hd-medium-gray);
+  font-size: .82rem;
+}
+.vendor-dc-list {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 300px; overflow-y: auto;
+}
+.vendor-dc-card {
+  padding: 10px 12px;
+  border: 1px solid var(--hd-light-gray);
+  border-radius: var(--radius);
+  background: #fff;
+}
+.vendor-dc-heading {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 8px;
+}
+.vendor-dc-meta, .vendor-dc-total {
+  color: var(--hd-medium-gray); font-size: .82rem;
+}
+.vendor-dc-buttons {
+  display: flex; flex-wrap: wrap; gap: 7px;
+}
+.vendor-dc-btn {
+  width: 48px; height: 36px; font-size: .82rem;
+}
+.vendor-dc-total {
+  margin-top: 8px; font-weight: 600;
+}
+
 .dc-filter-list {
   display: flex; flex-direction: column; gap: 6px;
 }

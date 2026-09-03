@@ -1306,6 +1306,41 @@
         }
     }
 
+    function parseVendorDcs(value) {
+        if (Array.isArray(value)) return value.map(Number).filter(Number.isFinite);
+        return String(value || "").split(/[,|]/).map(value => Number(value.trim())).filter(Number.isFinite);
+    }
+
+    function parseVendorNames(value) {
+        if (Array.isArray(value)) return value.map(String);
+        return String(value || "").split(/[,|]/).map(value => value.trim()).filter(Boolean);
+    }
+
+    function vendorDcName(dcNbr, names, index) {
+        if (names[index]) return names[index];
+        const known = ALL_DCS.find(dc => dc.nbr === dcNbr);
+        return known ? known.name : `DC ${dcNbr}`;
+    }
+
+    function toggleVendorDc(matchIndex, dcNbr) {
+        const match = vendorMatches[matchIndex];
+        const selected = parseVendorDcs(match?.DC_LIST);
+        if (!match || (selected.length === 1 && selected[0] === dcNbr)) {
+            toast("Each supplier must have at least one DC selected", "error");
+            return;
+        }
+        const next = selected.includes(dcNbr)
+            ? selected.filter(dc => dc !== dcNbr)
+            : [...selected, dcNbr];
+        next.sort((a, b) => a - b);
+        match.DC_LIST = next.join(", ");
+        match.DC_COUNT = next.length;
+        const initialDcs = parseVendorDcs(match._initialDcList);
+        const initialNames = parseVendorNames(match._initialDcNames);
+        match.DC_NM_LIST = next.map(dc => vendorDcName(dc, initialNames, initialDcs.indexOf(dc))).join(", ");
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
     // Per-supplier rollup of the vendor-strategy match: SKU count comes from
     // the uploaded template, DC count/list from the matched VENDOR_ALIGNED_STRATEGY
     // row. Suppliers falling back to the "OTHER" vendor are flagged, since their
@@ -1318,25 +1353,36 @@
             return;
         }
         let html = `<h4 style="margin:0 0 6px 0;font-size:.9rem">
-            <i class="fas fa-boxes-stacked"></i> Supplier Summary</h4>`;
-        html += `<div class="table-container" style="max-height:300px;overflow-y:auto">
-            <table class="detail-table"><thead><tr>
-                <th>Supplier</th><th style="text-align:right">SKU Count</th>
-                <th style="text-align:right">DC Count</th><th>DC List</th>
-            </tr></thead><tbody>`;
-        for (const m of matches) {
+            <i class="fas fa-boxes-stacked"></i> Supplier DC Assignments</h4>
+            <p class="vendor-dc-help">Select the DC buttons for each supplier. Hover over a DC number to see its name.</p>
+            <div class="vendor-dc-list">`;
+        matches.forEach((m, matchIndex) => {
             const isOther = (m.VENDOR || "").toUpperCase() === "OTHER";
-            html += `<tr><td>${m.SUPPLIER}${isOther
+            if (!m._initialDcList) m._initialDcList = Array.isArray(m.DC_LIST) ? m.DC_LIST.join(", ") : (m.DC_LIST || "");
+            if (!m._initialDcNames) m._initialDcNames = Array.isArray(m.DC_NM_LIST) ? m.DC_NM_LIST.join(", ") : (m.DC_NM_LIST || "");
+            const selectedDcs = parseVendorDcs(m.DC_LIST);
+            const initialDcs = parseVendorDcs(m._initialDcList);
+            const names = parseVendorNames(m._initialDcNames);
+            html += `<div class="vendor-dc-card"><div class="vendor-dc-heading">
+                <strong>${m.SUPPLIER}${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
-                    : ""}</td>
-                <td style="text-align:right">${fmtNum(m.SKU_COUNT)}</td>
-                <td style="text-align:right">${m.DC_COUNT}</td>
-                <td>${m.DC_LIST || "—"}</td></tr>`;
-        }
-        html += `</tbody><tfoot><tr style="font-weight:600;background:var(--hd-bg)">
-            <td>Total</td><td style="text-align:right">${fmtNum(totalSkus)}</td>
-            <td colspan="2"></td></tr></tfoot></table></div>`;
+                    : ""}</strong>
+                <span class="vendor-dc-meta">${fmtNum(m.SKU_COUNT)} SKU(s) · ${selectedDcs.length} matched DC${selectedDcs.length === 1 ? "" : "s"}</span></div>
+                <div class="vendor-dc-buttons">`;
+            initialDcs.forEach((dcNbr, dcIndex) => {
+                const name = vendorDcName(dcNbr, names, dcIndex);
+                html += `<button type="button" class="dc-toggle-btn vendor-dc-btn${selectedDcs.includes(dcNbr) ? " active" : ""}"
+                    title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-dc-nbr="${dcNbr}">${dcNbr}</button>`;
+            });
+            html += `</div></div>`;
+        });
+        html += `</div><div class="vendor-dc-total">Total: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))} SKU(s)</div>`;
         box.innerHTML = html;
+        box.querySelectorAll(".vendor-dc-btn").forEach(button => {
+            button.addEventListener("click", () => toggleVendorDc(
+                Number(button.dataset.matchIndex), Number(button.dataset.dcNbr)
+            ));
+        });
     }
 
     let availableDcOptions = [];
