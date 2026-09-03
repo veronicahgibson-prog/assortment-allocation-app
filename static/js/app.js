@@ -990,15 +990,19 @@
                 if (stratVal === "VENDOR_ALIGNED") {
                     $("#paramsVendor").style.display = "block";
                     if ($("#paramsCascading")) $("#paramsCascading").style.display = "none";
+                    $("#paramsCampus").style.display = "none";
+                    $("#paramsDcFilter").style.display = "none";
+                    campusPairs = [];
+                    dcInclusions = [];
+                    dcExclusions = [];
                 } else if (stratVal === "DC_SELECTION" || stratVal === "SINGLE_DC" || stratVal === "MULTI_DC") {
                     selectedStrategy = "DC_SELECTION";
                     $("#paramsDcSelection").style.display = "block";
                     syncIncludesImportsFromServer();
                     $("#btnDcKnow")?.click();
+                    $("#paramsCampus").style.display = "block";
+                    $("#paramsDcFilter").style.display = "block";
                 }
-                // Always show campus pairing and DC filter options
-                $("#paramsCampus").style.display = "block";
-                $("#paramsDcFilter").style.display = "block";
             });
         });
 
@@ -1933,9 +1937,6 @@
             wave_count: waveCount,
             run_id: $("#stratRunId")?.value?.trim() || "",
             email: $("#stratEmail")?.value?.trim() || "",
-            campus_pairs: campusPairs,
-            dc_inclusions: dcInclusions,
-            dc_exclusions: dcExclusions,
         };
 
         if (selectedStrategy === "VENDOR_ALIGNED") {
@@ -1954,6 +1955,9 @@
             }
             body.is_import = includesImports;
             body.sku_grp = $("#stratSkuGrp")?.value?.trim() || "";
+            body.campus_pairs = campusPairs;
+            body.dc_inclusions = dcInclusions;
+            body.dc_exclusions = dcExclusions;
         }
 
         try {

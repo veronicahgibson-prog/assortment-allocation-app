@@ -571,6 +571,13 @@ WITH SKU_LIST AS (
     SAFE_CAST(WAVE_3 AS INT64) AS W3_UNITS,
     SAFE_CAST(WAVE_4 AS INT64) AS W4_UNITS,
     SAFE_CAST(WAVE_5 AS INT64) AS W5_UNITS,
+        COUNTIF(
+            SAFE_CAST(WAVE_1 AS INT64) IS NOT NULL
+            OR SAFE_CAST(WAVE_2 AS INT64) IS NOT NULL
+            OR SAFE_CAST(WAVE_3 AS INT64) IS NOT NULL
+            OR SAFE_CAST(WAVE_4 AS INT64) IS NOT NULL
+            OR SAFE_CAST(WAVE_5 AS INT64) IS NOT NULL
+        ) OVER () > 0 AS WAVE_DATA_PRESENT,
     NULLIF(TRIM(SAFE_CAST(SUPPLIER AS STRING)), '') AS SUPPLIER,
     SAFE_CAST(MVNDR_NBR AS INT64) AS MVNDR_NBR,
     NULLIF(TRIM(SAFE_CAST(SKU_DESC AS STRING)), '') AS SKU_DESC
@@ -653,8 +660,9 @@ WAVE_SCALED AS (
     IF(W_SUM = 0, 0, CAST(FLOOR(IFNULL(W5_UNITS,0) * BUY_UNITS_RND / W_SUM) AS INT64)) AS B5,
     -- Remainder lands on the LAST non-empty wave, so rounding never pulls inventory earlier
     -- than planned and never revives a wave the plan left empty. No wave detail at all
-    -- (W_SUM = 0) collapses to a single wave 1.
-    CASE WHEN W_SUM = 0              THEN 1
+    -- (W_SUM = 0) collapses to a single wave 1 only when another uploaded row
+    -- contains wave data; a list with no wave data stays wave-free.
+    CASE WHEN W_SUM = 0 AND WAVE_DATA_PRESENT THEN 1
          WHEN IFNULL(W5_UNITS,0) > 0 THEN 5
          WHEN IFNULL(W4_UNITS,0) > 0 THEN 4
          WHEN IFNULL(W3_UNITS,0) > 0 THEN 3
@@ -666,7 +674,7 @@ WAVE_SCALED AS (
 WAVE_FINAL AS (
   SELECT * EXCEPT(B1, B2, B3, B4, B5, LAST_W, W_SUM,
                   W1_UNITS, W2_UNITS, W3_UNITS, W4_UNITS, W5_UNITS),
-    B1 + IF(LAST_W = 1, BUY_UNITS_RND - (B1+B2+B3+B4+B5), 0) AS W1_UNITS,
+    B1 + IF(LAST_W = 1 AND WAVE_DATA_PRESENT, BUY_UNITS_RND - (B1+B2+B3+B4+B5), 0) AS W1_UNITS,
     B2 + IF(LAST_W = 2, BUY_UNITS_RND - (B1+B2+B3+B4+B5), 0) AS W2_UNITS,
     B3 + IF(LAST_W = 3, BUY_UNITS_RND - (B1+B2+B3+B4+B5), 0) AS W3_UNITS,
     B4 + IF(LAST_W = 4, BUY_UNITS_RND - (B1+B2+B3+B4+B5), 0) AS W4_UNITS,

@@ -140,6 +140,10 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False) -> dict:
     bp_warnings = []
     wave_warnings = []
     present_waves = [w for w in WAVE_COLS if w in df.columns]
+    wave_data_present = any(
+        df[w].notna().any() and df[w].astype(str).str.strip().ne("").any()
+        for w in present_waves
+    )
     if "BUY_UNITS" in df.columns and "BP" in df.columns:
         for idx in df.index:
             buy_raw = df.at[idx, "BUY_UNITS"]
@@ -183,10 +187,12 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False) -> dict:
                         if floored[active_indices[j]] >= p and sum(floored) > optimal:
                             floored[active_indices[j]] -= p
             else:
-                floored = raw_waves[:]
+                floored = [optimal] + [0] * (len(present_waves) - 1) if wave_data_present else raw_waves[:]
 
             buy_changed = b != optimal
-            waves_changed = has_waves and any(floored[wi] != raw_waves[wi] for wi in range(len(present_waves)))
+            waves_changed = wave_data_present and any(
+                floored[wi] != raw_waves[wi] for wi in range(len(present_waves))
+            )
 
             if buy_changed:
                 df.at[idx, "BUY_UNITS"] = str(optimal)
