@@ -1278,13 +1278,6 @@
             if (result.error) throw new Error(result.error);
 
             vendorMatches = result.matches || [];
-            const tbody = $("#vendorMatchBody");
-            tbody.innerHTML = "";
-            for (const m of vendorMatches) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `<td>${m.SUPPLIER}</td><td>${m.VENDOR}</td><td>${m.ASMT_ID}</td><td>${m.DC_COUNT}</td><td>${m.DC_NM_LIST || m.DC_LIST || "—"}</td>`;
-                tbody.appendChild(tr);
-            }
 
             const summary = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-info-circle"></i> 
@@ -1307,13 +1300,13 @@
     }
 
     function parseVendorDcs(value) {
-        if (Array.isArray(value)) return value.map(Number).filter(Number.isFinite);
-        return String(value || "").split(/[,|]/).map(value => Number(value.trim())).filter(Number.isFinite);
+        const values = Array.isArray(value) ? value : String(value || "").match(/\d+/g) || [];
+        return [...new Set(values.map(Number).filter(Number.isFinite))];
     }
 
     function parseVendorNames(value) {
         if (Array.isArray(value)) return value.map(String);
-        return String(value || "").split(/[,|]/).map(value => value.trim()).filter(Boolean);
+        return String(value || "").replace(/^\[|\]$/g, "").split(/[,|]/).map(value => value.replace(/^['\"]|['\"]$/g, "").trim()).filter(Boolean);
     }
 
     function vendorDcName(dcNbr, names, index) {
@@ -1358,7 +1351,7 @@
             <div class="vendor-dc-list">`;
         matches.forEach((m, matchIndex) => {
             const isOther = (m.VENDOR || "").toUpperCase() === "OTHER";
-            if (!m._initialDcList) m._initialDcList = Array.isArray(m.DC_LIST) ? m.DC_LIST.join(", ") : (m.DC_LIST || "");
+            if (!m._initialDcList) m._initialDcList = parseVendorDcs(m.DC_LIST).join(", ");
             if (!m._initialDcNames) m._initialDcNames = Array.isArray(m.DC_NM_LIST) ? m.DC_NM_LIST.join(", ") : (m.DC_NM_LIST || "");
             const selectedDcs = parseVendorDcs(m.DC_LIST);
             const initialDcs = parseVendorDcs(m._initialDcList);
