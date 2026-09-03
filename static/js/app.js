@@ -1374,10 +1374,10 @@
             match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
             const defaultDcs = parseVendorDcs(match.DC_LIST);
             let html = `<table class="detail-table vendor-sku-table"><thead><tr>
-                <th>THD SKU</th><th>Description</th><th>BP</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
+                <th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
             result.rows.forEach(row => {
                 const selectedDcs = vendorSkuDcs(match, row);
-                html += `<tr><td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.BP || "—"}</td>
+                html += `<tr><td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td>
                     <td class="vendor-sku-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
                 defaultDcs.forEach((dcNbr, dcIndex) => {
                     const name = vendorDcName(dcNbr, parseVendorNames(match._initialDcNames), dcIndex);

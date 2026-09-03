@@ -1049,6 +1049,44 @@ def api_vendor_skus():
     total = len(rows_df)
     start = (page - 1) * page_size
 
+    def numeric_value(value, default=0):
+        try:
+            return float(str(value).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return default
+
+    item_cubes = {}
+    sku_values = [int(numeric_value(value)) for value in rows_df["THD_SKU_NBR"].dropna().tolist()]
+    if sku_values:
+        cube_query = f"""
+            SELECT THD_SKU_NBR AS SKU_NBR, MAX(ITEM_CUBE) AS ITEM_CUBE
+            FROM {EVENTS_SKU_LIST}
+            WHERE UPPER(EVENT_NAME) = @event_name
+              AND EVENT_YEAR = @event_year
+              AND THD_SKU_NBR IN UNNEST(@sku_list)
+            GROUP BY THD_SKU_NBR
+        """
+        cube_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("event_name", "STRING", _upload_cache.get("event_name", "").upper()),
+            bigquery.ScalarQueryParameter("event_year", "INT64", int(_upload_cache.get("event_year", 2026))),
+            bigquery.ArrayQueryParameter("sku_list", "INT64", sorted(set(sku_values))),
+        ])
+        for cube_row in bq().query(cube_query, job_config=cube_config).result():
+            item_cubes[int(cube_row.SKU_NBR)] = float(cube_row.ITEM_CUBE or 0)
+
+        missing_cubes = sorted(set(sku_values) - set(item_cubes))
+        if missing_cubes:
+            fallback_query = f"""
+                SELECT SKU_NBR, ROUND(ECH_DPTH * ECH_WDTH * ECH_HGHT, 2) AS ITEM_CUBE
+                FROM {SCHN_SKU_ATTR}
+                WHERE SKU_NBR IN UNNEST(@sku_list) AND LATEST_SKU_CRT_DT_FLG IS TRUE
+            """
+            fallback_config = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("sku_list", "INT64", missing_cubes),
+            ])
+            for cube_row in bq().query(fallback_query, job_config=fallback_config).result():
+                item_cubes[int(cube_row.SKU_NBR)] = float(cube_row.ITEM_CUBE or 0)
+
     rows = []
     for _, row in rows_df.iloc[start:start + page_size].iterrows():
         item = {}
@@ -1057,6 +1095,10 @@ def api_vendor_skus():
                 continue
             value = row[col]
             item[col] = "" if pd.isna(value) else str(value)
+        sku_nbr = int(numeric_value(row["THD_SKU_NBR"])) if pd.notna(row.get("THD_SKU_NBR")) else None
+        buy_units = numeric_value(row.get("BUY_UNITS")) if pd.notna(row.get("BUY_UNITS")) else 0
+        item["TOTAL_UNITS"] = str(int(buy_units)) if buy_units else ""
+        item["TOTAL_CUBE"] = f"{item_cubes.get(sku_nbr, 0) * buy_units:.2f}" if sku_nbr else ""
         rows.append(item)
     return jsonify({"rows": rows, "page": page, "page_size": page_size, "total": total, "pages": (total + page_size - 1) // page_size})
 
