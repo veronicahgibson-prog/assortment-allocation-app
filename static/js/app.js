@@ -232,10 +232,16 @@
             const eventSelect = $("#step1EventNameSelect");
             const eventCustom = $("#step1EventNameCustom");
             const selectedEvent = eventSelect?.value === "__other__" ? eventCustom?.value : eventSelect?.value;
+            const eventNameValue = (selectedEvent || eventName || "").trim().toUpperCase();
+            const eventYearValue = $("#step1EventYear")?.value?.trim() || String(eventYear || "");
+            if (!eventNameValue || !eventYearValue) {
+                toast("Enter an Event Name and Event Year before downloading", "error");
+                return;
+            }
             const params = new URLSearchParams({
                 imports: String(includesImports),
-                event_name: (selectedEvent || "").trim().toUpperCase(),
-                event_year: $("#step1EventYear")?.value?.trim() || "",
+                event_name: eventNameValue,
+                event_year: eventYearValue,
                 _t: String(Date.now()),
             });
             const url = `/api/download_template?${params}`;
