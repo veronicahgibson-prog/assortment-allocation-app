@@ -149,10 +149,10 @@ def _build_template(columns, filename, event_name="", event_year=""):
         if col["required"] or col.get("note"):
             cell.fill = req_fill
 
-    if event_name or event_year:
-        ws.cell(row=3, column=1, value=event_name or None)
-        if len(columns) > 1 and columns[1]["name"] == "EVENT_YEAR":
-            ws.cell(row=3, column=2, value=int(event_year) if str(event_year).isdigit() else event_year or None)
+    if event_name:
+        ws.cell(row=2, column=1, value=event_name)
+    if event_year and len(columns) > 1 and columns[1]["name"] == "EVENT_YEAR":
+        ws.cell(row=2, column=2, value=int(event_year) if str(event_year).isdigit() else event_year)
 
     ws.freeze_panes = "A3"
 
