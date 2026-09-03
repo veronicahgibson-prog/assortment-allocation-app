@@ -206,10 +206,14 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False) -> dict:
                     df.at[idx, w] = str(floored[wi])
                 old_waves = " | ".join(f"{present_waves[wi]}={raw_waves[wi]}" for wi in range(len(present_waves)) if raw_waves[wi] > 0)
                 new_waves = " | ".join(f"{present_waves[wi]}={floored[wi]}" for wi in range(len(present_waves)) if floored[wi] > 0 or raw_waves[wi] > 0)
+                if not has_waves and floored[0] > 0:
+                    wave_message = f"No wave data for this record; moved {floored[0]} BUY_UNITS to WAVE_1"
+                else:
+                    wave_message = f"Waves adjusted: [{old_waves}] → [{new_waves}]"
                 wave_warnings.append({
                     "row": int(idx) + 2, "column": "WAVES",
                     "row_data": {c: str(df.at[idx, c]) if pd.notna(df.at[idx, c]) else "" for c in df.columns},
-                    "message": f"Waves adjusted: [{old_waves}] → [{new_waves}]",
+                    "message": wave_message,
                 })
 
     checks.append({
