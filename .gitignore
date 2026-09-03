@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+*.json
+*.key
+*.pem
+credentials/
+
+# Local diagnostic scripts are not part of the deployed app.
+debug_*.py
+diag_*.py
+
+.DS_Store

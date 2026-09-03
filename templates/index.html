@@ -1,0 +1,669 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Assortment & Allocation — The Home Depot</title>
+    <link rel="stylesheet" href="/static/css/styles.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+</head>
+<body>
+    <div class="top-bar"></div>
+
+    <!-- HEADER -->
+    <header class="header">
+        <div class="header-inner">
+            <div class="header-brand">
+                <img src="/static/img/hd-logo.jpg" alt="The Home Depot" class="hd-logo" />
+                <div>
+                    <h1>Assortment & Allocation Automation</h1>
+                    <span class="header-sub">Supply Chain Analytics &mdash; Events Workflow</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <span id="userBadge" class="user-badge"><i class="fas fa-user"></i> —</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- WIZARD STEPPER -->
+    <nav class="stepper-section">
+        <div class="stepper">
+            <div class="step active" data-step="1"><span class="step-num">1</span><span class="step-label">Config & Template</span></div>
+            <div class="step" data-step="2"><span class="step-num">2</span><span class="step-label">Strategy & Upload</span></div>
+            <div class="step" data-step="5"><span class="step-num">3</span><span class="step-label">Insert</span></div>
+            <div class="step" data-step="6"><span class="step-num">4</span><span class="step-label">Asmt Tool</span></div>
+            <div class="step" data-step="7"><span class="step-num">5</span><span class="step-label">Assortment</span></div>
+            <div class="step" data-step="8"><span class="step-num">6</span><span class="step-label">Allocation</span></div>
+        </div>
+    </nav>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 1: CONFIGURATION & TEMPLATE DOWNLOAD -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel active" id="panel-1">
+        <div class="card">
+            <h3><i class="fas fa-cog"></i> Step 1: Event Configuration & Template Download</h3>
+            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+                Does your SKU list contain imports? This determines which template and validations apply.
+            </p>
+
+            <!-- Event name/year + prior-year strategy lookup -->
+            <div style="margin-bottom:20px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+                <div>
+                    <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Event Name</label>
+                    <select id="step1EventNameSelect"
+                        style="display:block;width:240px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
+                        <option value="">Loading…</option>
+                    </select>
+                    <input type="text" id="step1EventNameCustom" placeholder="Enter new event name"
+                        style="display:none;width:240px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
+                </div>
+                <div>
+                    <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Event Year</label>
+                    <input type="number" id="step1EventYear" placeholder="e.g. 2027"
+                        style="display:block;width:120px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
+                </div>
+                <button class="btn btn-secondary" id="btnCheckPriorStrategy">
+                    <i class="fas fa-clock-rotate-left"></i> Check Last Year's Strategy
+                </button>
+            </div>
+            <div id="priorStrategySection" style="display:none;margin-bottom:20px;padding:14px 16px;background:#f5f5f5;border-radius:6px"></div>
+
+            <div class="import-toggle" style="margin-bottom:20px;display:flex;gap:16px">
+                <label class="strategy-option" style="display:inline-block;flex:1">
+                    <input type="radio" name="importToggle" value="false" checked />
+                    <div class="strategy-card" style="padding:10px 18px;text-align:center;height:100%;display:flex;align-items:center;justify-content:center">
+                        <strong><i class="fas fa-home"></i> Domestic Only</strong>
+                    </div>
+                </label>
+                <label class="strategy-option" style="display:inline-block;flex:1">
+                    <input type="radio" name="importToggle" value="true" />
+                    <div class="strategy-card" style="padding:10px 18px;text-align:center;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center">
+                        <strong><i class="fas fa-ship"></i> Import Only</strong>
+                        <span>*requires Factory ID</span>
+                    </div>
+                </label>
+            </div>
+
+            <!-- Container size (imports only) -->
+            <div id="containerSizeStep1" style="display:none;margin-bottom:20px;padding:12px 16px;background:#f5f5f5;border-radius:6px">
+                <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Container Size (cuft):</label>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                    <select id="containerSizeSelect" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
+                        <option value="2390" selected>2390 (40ft standard)</option>
+                        <option value="3000">3000 (40ft high-cube)</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                    <input id="containerSizeCustom" type="number" min="1" placeholder="cuft" style="display:none;width:80px;padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
+                </div>
+            </div>
+
+            <!-- Template Download Section -->
+            <div style="margin-top:20px;padding:16px;background:#eef6ff;border:1px solid #b6d4fe;border-radius:8px">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+                    <div>
+                        <strong id="templateTitleText" style="display:block;margin-bottom:4px;color:var(--hd-dark-gray);font-size:0.92rem">
+                            <i class="fas fa-file-excel" style="color:#107c41;margin-right:6px"></i> Domestic Template
+                        </strong>
+                        <span id="templateDescText" style="font-size:.82rem;color:var(--hd-medium-gray)"></span>
+                    </div>
+                    <button class="btn btn-primary" id="btnDownloadTemplate" style="background:#107c41;border-color:#107c41">
+                        <i class="fas fa-download"></i> Download Template
+                    </button>
+                </div>
+            </div>
+        </div>
+        <div class="wizard-nav">
+            <span></span>
+            <button class="btn btn-primary" onclick="goStep(2)">Next <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 3: TEMPLATE DOWNLOAD -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel" id="panel-3">
+        <div class="card">
+            <h3><i class="fas fa-file-excel"></i> Step 3: Download Template</h3>
+            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+                Download the Excel template pre-configured for your selection, fill it out, then proceed to upload.
+            </p>
+            <button class="btn btn-primary" id="btnDownloadTemplate">
+                <i class="fas fa-download"></i> Download Excel Template
+            </button>
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="goStep(2)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button class="btn btn-primary" onclick="goStep(4)">Next <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 4: FILE UPLOAD & VALIDATION (REDIRECT) -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel" id="panel-4">
+        <div class="card">
+            <h3><i class="fas fa-cloud-arrow-up"></i> Step 4: Upload & Validate</h3>
+            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+                File upload and validation has been moved directly into <strong>Step 2 (Strategy & Upload)</strong>.
+            </p>
+            <button class="btn btn-primary" onclick="goStep(2)">
+                <i class="fas fa-arrow-left"></i> Go to Step 2 (Strategy & Upload)
+            </button>
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="goStep(3)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button class="btn btn-primary" onclick="goStep(5)">Next <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 5: INSERT TO BIGQUERY -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel" id="panel-5">
+        <div class="card">
+            <h3><i class="fas fa-database"></i> Step 5: Insert to BigQuery</h3>
+            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+                Confirm this is the SKU list you would like to use. Once inserted,
+                the data will be written to <code>CM_STAGE.EVENTS_SKU_LIST</code>
+                with computed columns (SKU_BUY_CUBE, SKU_LEVEL_CONTAINERS, timestamps).
+            </p>
+            <div id="insertStatus" style="display:none;margin-bottom:12px"></div>
+            <button class="btn btn-success" id="btnInsert">
+                <i class="fas fa-cloud-arrow-up"></i> Insert to BigQuery
+            </button>
+            <button class="btn btn-secondary" id="btnReplaceInsert" style="display:none;margin-left:8px;background:#856404;color:#fff;border-color:#856404">
+                <i class="fas fa-rotate"></i> Replace Existing Data
+            </button>
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="goStep(4)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button class="btn btn-primary" id="btnGoStrategy" disabled onclick="goStep(6)">Next <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 6: ASSORTMENT TOOL SUBMISSION -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel" id="panel-6">
+        <div class="card">
+            <h3><i class="fas fa-flask"></i> Step 6: Run Assortment Tool</h3>
+            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+                Submit SKU data to the DFC Cost Model, then run the assortment tool to generate catalog results.
+            </p>
+
+            <!-- SKU Breakdown Charts -->
+            <div id="skuBreakdownSection" style="margin-bottom:20px">
+                <div style="display:flex;gap:24px;flex-wrap:wrap;justify-content:center;margin-bottom:16px">
+                    <div style="max-width:280px;flex:1">
+                        <h4 style="text-align:center;font-size:0.9rem;margin-bottom:8px">SKU Count by Type</h4>
+                        <canvas id="skuCountPieChart"></canvas>
+                    </div>
+                    <div style="max-width:280px;flex:1">
+                        <h4 style="text-align:center;font-size:0.9rem;margin-bottom:8px">Total Units by SKU Type</h4>
+                        <canvas id="skuUnitsPieChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cost Model Preview Table -->
+            <div id="costModelPreview" style="display:none;margin-bottom:16px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                    <h4 style="margin:0"><i class="fas fa-table"></i> Cost Model Submission Preview</h4>
+                    <button class="btn btn-sm btn-secondary" id="btnDownloadCostModel" style="font-size:0.8rem;padding:4px 10px">
+                        <i class="fas fa-download"></i> Download CSV
+                    </button>
+                </div>
+                <div class="table-container" style="max-height:300px;overflow-y:auto">
+                    <table class="detail-table" id="costModelTable">
+                        <thead><tr><th>SKU</th><th>Buy Qty</th><th>Type</th></tr></thead>
+                        <tbody id="costModelBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="costModelStatus"></div>
+            <div style="margin-top:16px;display:flex;gap:10px;align-items:center">
+                <button class="btn btn-primary" id="btnSubmitCostModel">
+                    <i class="fas fa-upload"></i> Submit to Cost Model
+                </button>
+                <button class="btn btn-sm" id="btnDeleteCostModel" style="background:#dc3545;color:#fff;font-size:0.8rem;padding:6px 12px">
+                    <i class="fas fa-trash-alt"></i> Delete Previous Submission
+                </button>
+                <button class="btn btn-primary" id="btnRunAsmtTool" style="display:none;margin-left:10px" disabled>
+                    <i class="fas fa-play"></i> Run Assortment Tool
+                </button>
+            </div>
+            <div id="asmtToolStatus" style="display:none;margin-top:16px"></div>
+
+            <!-- Run context — the catalog run above is what resolves Run ID/SKU
+                 Group; the strategy choices themselves were captured back on
+                 Step 2, before any of this data existed. -->
+            <div id="strategyRunContext" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:20px;padding:12px 16px;background:var(--hd-bg);border-radius:8px;border:1px solid var(--hd-light-gray)">
+                <div style="flex:1;min-width:220px">
+                    <label style="font-size:0.8rem;color:var(--hd-medium-gray);display:block;margin-bottom:4px"><i class="fas fa-key"></i> Run ID</label>
+                    <input type="text" id="stratRunId" class="form-input" style="font-size:0.85rem" />
+                </div>
+                <div style="flex:1;min-width:220px">
+                    <label style="font-size:0.8rem;color:var(--hd-medium-gray);display:block;margin-bottom:4px"><i class="fas fa-tag"></i> SKU Group</label>
+                    <input type="text" id="stratSkuGrp" class="form-input" style="font-size:0.85rem" placeholder="LDAP-EVENT NAME-EVENT NAME" />
+                </div>
+                <div style="flex:1;min-width:220px">
+                    <label style="font-size:0.8rem;color:var(--hd-medium-gray);display:block;margin-bottom:4px"><i class="fas fa-envelope"></i> Email</label>
+                    <input type="text" id="stratEmail" class="form-input" style="font-size:0.85rem" />
+                </div>
+            </div>
+        </div>
+        <div id="lowVolumeAlert" style="display:none;margin-bottom:16px"></div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="goStep(5)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button class="btn btn-primary" id="btnDetermineAsmt">
+                <i class="fas fa-search"></i> Determine Assortment IDs <i class="fas fa-arrow-right"></i>
+            </button>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 2: STRATEGY CONFIGURATION & FILE UPLOAD -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel" id="panel-2">
+        <div class="card" style="margin-bottom:20px">
+            <h3><i class="fas fa-sliders"></i> Step 2: Define Strategy & Eligible DC Network</h3>
+
+            <!-- Follow last year's strategy? Populated from Step 1's prior-year
+                 lookup — pre-fills strategy type, DC counts, buildings, and
+                 campus pairing, but leaves every control editable below. -->
+            <div id="followLastYearBox" style="display:none;margin-bottom:20px;padding:14px 16px;background:#eef6ff;border:1px solid #b6d4fe;border-radius:8px">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;margin:0">
+                    <input type="checkbox" id="followLastYearToggle" />
+                    <span><i class="fas fa-clock-rotate-left"></i> Follow <span id="followLastYearEventLabel">last year's</span> strategy?</span>
+                </label>
+                <div id="followLastYearNote" style="display:none;margin-top:8px;font-size:0.85rem;color:#333"></div>
+            </div>
+
+            <!-- Strategy Selection: Condensed into Vendor-Aligned and DC Selection -->
+            <div class="strategy-grid">
+                <label class="strategy-option">
+                    <input type="radio" name="strategy" value="VENDOR_ALIGNED" />
+                    <div class="strategy-card">
+                        <strong>Vendor-Aligned</strong>
+                        <span>Map vendor strategy table to assortment IDs</span>
+                    </div>
+                </label>
+                <label class="strategy-option">
+                    <input type="radio" name="strategy" value="DC_SELECTION" />
+                    <div class="strategy-card">
+                        <strong>DC Selection</strong>
+                        <span>Define DC count(s) and eligible network for assortment</span>
+                    </div>
+                </label>
+            </div>
+
+            <!-- Conditional Parameters -->
+            <div id="strategyParams" style="margin-top:20px;display:none">
+
+                <!-- VENDOR_ALIGNED fields -->
+                <div class="param-group" id="paramsVendor" style="display:none">
+                    <div class="form-row">
+                        <button class="btn btn-primary btn-sm" id="btnMatchVendors">
+                            <i class="fas fa-link"></i> Match Suppliers to Vendor Strategies
+                        </button>
+                    </div>
+                    <div id="vendorMatchResult" style="display:none;margin-top:12px">
+                        <div id="vendorMatchSummary" style="margin-bottom:10px"></div>
+                        <div class="table-container" style="max-height:300px;overflow-y:auto">
+                            <table class="detail-table" id="vendorMatchTable">
+                                <thead><tr><th>Supplier</th><th>Matched Vendor</th><th>ASMT_ID</th><th>DC Count</th><th>DCs</th></tr></thead>
+                                <tbody id="vendorMatchBody"></tbody>
+                            </table>
+                        </div>
+                        <div id="vendorConfirmBox" style="margin-top:12px">
+                            <button class="btn btn-primary" id="btnConfirmVendorStrategy">
+                                <i class="fas fa-check"></i> Confirm Vendor Strategies
+                            </button>
+                        </div>
+                        <div id="vendorChartContainer" style="display:none;max-width:400px;margin:20px auto 0">
+                            <canvas id="vendorPieChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DC Selection -->
+                <div class="param-group" id="paramsDcSelection" style="display:none">
+                    <div class="form-row">
+                        <label>Do you know which DC count(s) you want?</label>
+                        <div style="display:flex;gap:10px;margin-top:6px">
+                            <button class="btn btn-sm btn-primary" id="btnDcKnow">Yes</button>
+                            <button class="btn btn-sm btn-secondary" id="btnDcLookup">No, determine the optimal DC count(s) for me</button>
+                        </div>
+                    </div>
+
+                    <!-- Manual Selection (1 to 13) -->
+                    <div id="dcManual" style="display:none;margin-top:12px">
+                        <label style="margin-bottom:8px;display:block">Select DC Count(s) <span style="font-weight:normal;color:#888;font-size:0.8rem">(1 to 13)</span></label>
+                        <div class="dc-toggle-grid" id="dcToggleGrid"></div>
+                        <div id="dcSelectionCountBadge" style="margin-top:10px"></div>
+                    </div>
+
+                    <!-- Lookup / Dynamic Selection -->
+                    <div id="dcLookup" style="display:none;margin-top:12px">
+                        <div class="form-row">
+                            <button class="btn btn-primary btn-sm" id="btnLoadDcCounts">
+                                <i class="fas fa-search"></i> Load Available DC Counts
+                            </button>
+                        </div>
+                        <div id="dcCountResult" style="display:none;margin-top:12px">
+                            <div id="dcCountSummary" style="margin-bottom:10px"></div>
+                            <div class="dc-count-checks" id="dcCountChecks"></div>
+                        </div>
+                    </div>
+                    <div id="dcDynamic" style="display:none;margin-top:12px">
+                        <div class="validation-badge badge-pass" style="font-size:0.9rem;display:block">
+                            <i class="fas fa-magic"></i> Per factory, the tool prices every DC count (2-13), then assigns the
+                            widest count that keeps containers at least 80% full while staying within 2% of that factory's
+                            cheapest option. Each factory may land on a different DC count and assortment ID.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Campus Pairing (applies to all strategies) -->
+                <div class="param-group" id="paramsCampus" style="display:none;margin-top:20px;border-top:1px solid var(--hd-light-gray);padding-top:16px">
+                    <div class="form-row">
+                        <label><i class="fas fa-building"></i> Treat bulk counterparts the same?</label>
+                        <div style="display:flex;gap:10px;margin-top:6px">
+                            <button class="btn btn-sm btn-primary" id="btnCampusYes">Yes</button>
+                            <button class="btn btn-sm btn-secondary" id="btnCampusNo">No</button>
+                        </div>
+                    </div>
+                    <div id="campusSelection" style="display:none;margin-top:12px">
+                        <label style="margin-bottom:8px;display:block">Select campus pairs to merge:</label>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap">
+                            <button class="btn btn-sm dc-toggle-btn" id="btnCampusPerris" data-campus="perris" style="width:auto;padding:6px 16px">Perris</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnCampusLG" data-campus="locust_grove" style="width:auto;padding:6px 16px">Locust Grove</button>
+                        </div>
+                        <div id="campusNotice" style="display:none;margin-top:10px;padding:10px 14px;border-radius:6px;background:#fff3cd;border:1px solid #ffc107;font-size:0.85rem">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DC Inclusions / Exclusions -->
+                <div class="param-group" id="paramsDcFilter" style="display:none;margin-top:20px;border-top:1px solid var(--hd-light-gray);padding-top:16px">
+                    <div class="form-row">
+                        <label><i class="fas fa-filter"></i> Do you know which DCs to include or exclude?</label>
+                        <div style="display:flex;gap:10px;margin-top:6px">
+                            <button class="btn btn-sm btn-primary" id="btnDcFilterYes">Yes</button>
+                            <button class="btn btn-sm btn-secondary" id="btnDcFilterNo">No</button>
+                        </div>
+                    </div>
+                    <div id="dcFilterSelection" style="display:none;margin-top:12px">
+                        <div style="display:flex;gap:24px;flex-wrap:wrap">
+                            <div style="flex:1;min-width:250px">
+                                <label style="margin-bottom:8px;display:block;font-weight:600;color:var(--hd-green)"><i class="fas fa-plus-circle"></i> Include</label>
+                                <div class="dc-filter-list" id="dcIncludeList"></div>
+                            </div>
+                            <div style="flex:1;min-width:250px">
+                                <label style="margin-bottom:8px;display:block;font-weight:600;color:var(--hd-red, #c00)"><i class="fas fa-minus-circle"></i> Exclude</label>
+                                <div class="dc-filter-list" id="dcExcludeList"></div>
+                            </div>
+                        </div>
+                        <div id="dcFilterNotice" style="display:none;margin-top:10px;padding:10px 14px;border-radius:6px;background:#d4edda;border:1px solid #28a745;font-size:0.85rem"></div>
+                    </div>
+                </div>
+
+                <!-- Cascading Assortments -->
+                <div class="param-group" id="paramsCascading" style="display:none;margin-top:20px;border-top:1px solid var(--hd-light-gray);padding-top:16px">
+                    <div class="form-row">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                            <input type="checkbox" id="cascadingToggle" checked />
+                            <strong>Cascading Assortments</strong>
+                        </label>
+                        <span style="font-size:0.8rem;color:var(--hd-medium-gray);margin-top:2px;display:block">
+                            Each tier's DCs are a subset of the next larger tier
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 2: File Upload & Validation -->
+        <div class="card">
+            <h3><i class="fas fa-cloud-arrow-up"></i> Upload & Validate SKU List</h3>
+            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+                Upload your SKU list (.xlsx or .csv) to validate data formatting.
+            </p>
+
+            <div class="drop-zone" id="dropZone">
+                <i class="fas fa-file-arrow-up" style="font-size:2.5rem;color:var(--hd-orange);margin-bottom:8px"></i>
+                <p>Drag & drop your .xlsx or .csv file here</p>
+                <p style="font-size:.78rem;color:var(--hd-medium-gray)">or click to browse (max 10 MB)</p>
+                <input type="file" id="fileInput" accept=".xlsx,.csv" style="display:none" />
+            </div>
+            <div id="fileName" style="margin-top:8px;font-size:.85rem;color:var(--hd-medium-gray)"></div>
+
+            <!-- Validation Results -->
+            <div id="validationResults" style="display:none;margin-top:16px">
+                <h4 style="margin-bottom:8px">Validation Checks</h4>
+                <div id="checksList"></div>
+
+                <!-- Errors -->
+                <div id="errorSection" style="display:none;margin-top:12px">
+                    <h4 style="color:var(--hd-red);margin-bottom:8px"><i class="fas fa-times-circle"></i> Errors</h4>
+                    <div class="table-container" style="max-height:300px;overflow:auto">
+                        <table class="detail-table" id="errorTable" style="font-size:.72rem;white-space:nowrap">
+                            <thead><tr><th>Row</th><th>Column</th><th>Error</th><th>THD_SKU_NBR</th><th>SISTER_SKU_NBR</th><th>SKU_DESC</th><th>SUPPLIER</th><th>MVNDR_NBR</th><th>FACTORY_ID</th><th>BP</th><th>BUY_UNITS</th><th>WAVE_1</th><th>WAVE_2</th><th>WAVE_3</th><th>WAVE_4</th><th>WAVE_5</th></tr></thead>
+                            <tbody id="errorTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- FYI Warnings -->
+                <div id="warningSection" style="display:none;margin-top:12px">
+                    <h4 style="color:#b8860b;margin-bottom:8px"><i class="fas fa-info-circle"></i> FYI</h4>
+                    <div class="table-container" style="max-height:200px;overflow:auto">
+                        <table class="detail-table" id="warningTable" style="font-size:.72rem;white-space:nowrap">
+                            <thead><tr><th>Row</th><th>Column</th><th>Message</th><th>THD_SKU_NBR</th><th>SISTER_SKU_NBR</th><th>SKU_DESC</th><th>SUPPLIER</th><th>MVNDR_NBR</th><th>FACTORY_ID</th><th>BP</th><th>BUY_UNITS</th><th>WAVE_1</th><th>WAVE_2</th><th>WAVE_3</th><th>WAVE_4</th><th>WAVE_5</th></tr></thead>
+                            <tbody id="warningTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Success Summary -->
+                <div id="successSection" style="display:none;margin-top:12px">
+                    <div id="thdKeyInfo" style="display:none;margin-bottom:10px;padding:8px 12px;background:#f5f5f5;border-radius:6px;font-size:.82rem">
+                        <strong>THD_KEY:</strong> <span id="thdKeyLabel"></span>
+                    </div>
+                    <div class="kpi-cards" style="justify-content:flex-start">
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumRows">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Rows</div>
+                        </div>
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumBuyUnits">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Total Buy Units</div>
+                        </div>
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumOptimalBuy">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Optimal Buy Units</div>
+                        </div>
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumSuppliers">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Suppliers</div>
+                        </div>
+                        <div class="kpi-card" id="sumFactoriesCard" style="display:none">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumFactories">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Factories</div>
+                        </div>
+                    </div>
+                    <!-- Factory distribution table (imports only) -->
+                    <div id="factoryDistribution" style="display:none;margin-top:12px">
+                        <h5 style="margin-bottom:6px;font-size:.82rem;color:var(--hd-dark-gray)">Factory Distribution</h5>
+                        <div class="table-container" style="max-height:200px;overflow-y:auto">
+                            <table class="detail-table" style="font-size:.8rem">
+                                <thead><tr><th>Factory ID</th><th style="text-align:right">SKUs<br><span style="font-weight:normal;font-size:.65rem;color:#888">distinct THD Keys</span></th><th style="text-align:right">Optimal Buy Units</th><th style="text-align:right">Containers</th></tr></thead>
+                                <tbody id="factoryDistBody"></tbody>
+                            </table>
+                        </div>
+                        <button class="btn btn-secondary" id="btnDownloadFactoryDist" style="margin-top:8px;font-size:.75rem">
+                            <i class="fas fa-download"></i> Download Factory Distribution
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Import mismatch alert -->
+                <div id="importMismatchAlert" style="display:none;margin-top:12px;padding:14px 16px;background:#fff3cd;border:1px solid #ffc107;border-radius:8px">
+                    <i class="fas fa-exclamation-triangle" style="color:#856404;margin-right:6px"></i>
+                    <strong style="color:#856404">Import file detected!</strong>
+                    <p style="margin:6px 0 0;color:#856404;font-size:.85rem">
+                        This file contains a <code>FACTORY_ID</code> column, which indicates an import file.
+                        Please go back to <strong>Step 1</strong> and select <strong>"Includes Imports"</strong> with your container size.
+                    </p>
+                    <button class="btn btn-secondary" style="margin-top:10px;font-size:.8rem" onclick="goStep(1)">
+                        <i class="fas fa-arrow-left"></i> Go to Step 1
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="goStep(1)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button class="btn btn-primary" id="btnGoInsert" onclick="goStep(3)">Next <i class="fas fa-arrow-right"></i></button>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 7: ASSORTMENT ID DETERMINATION -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel" id="panel-7">
+        <div class="card">
+            <h3><i class="fas fa-map-signs"></i> Step 7: Assortment ID Results</h3>
+            <p style="margin-bottom:12px;color:var(--hd-medium-gray)">
+                Review the assigned assortment IDs below. Confirm to proceed with allocation.
+            </p>
+            <div id="asmtCachedBanner" style="display:none;margin-bottom:14px;padding:10px 14px;border-radius:6px;background:#e7f3ff;border:1px solid #339af0;font-size:0.85rem;display:flex;align-items:center;justify-content:space-between;gap:12px">
+                <span><i class="fas fa-clock-rotate-left"></i> Showing results from your last run — configuration hasn't changed.</span>
+                <button class="btn btn-sm btn-secondary" id="btnRedetermineAsmt"><i class="fas fa-rotate"></i> Redetermine</button>
+            </div>
+            <div id="asmtUnmappedWarning" style="display:none;margin-bottom:14px;padding:10px 14px;border-radius:6px;background:#f8d7da;border:1px solid #dc3545;color:#721c24;font-size:0.85rem"></div>
+            <div id="vendorChartContainerResults" style="display:none;max-width:400px;margin:0 auto 20px">
+                <canvas id="vendorPieChartResults"></canvas>
+            </div>
+            <div class="table-container" style="max-height:400px;overflow-y:auto">
+                <table class="detail-table" id="asmtTable">
+                    <thead><tr>
+                        <th>SKU_NBR</th><th>SUPPLIER</th><th>FACTORY_ID</th>
+                        <th>DC_COUNT</th><th>CAMP_ASMT_ID</th><th>DC_LIST</th><th>TOTAL_EXPENSE</th>
+                    </tr></thead>
+                    <tbody id="asmtTableBody">
+                        <tr><td colspan="7" style="text-align:center;color:#666;padding:20px">No data yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="goStep(6)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button class="btn btn-primary" id="btnConfirmAsmt" disabled>
+                Confirm & Run Allocation <i class="fas fa-arrow-right"></i>
+            </button>
+        </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <!-- SECTION 8: ALLOCATION RESULTS & EXPORT -->
+    <!-- ═══════════════════════════════════════════════════════════ -->
+    <section class="wizard-panel" id="panel-8">
+        <div class="card">
+            <h3><i class="fas fa-chart-bar"></i> Step 8: Allocation</h3>
+
+            <!-- KPIs -->
+            <div class="kpi-cards" style="margin-bottom:16px" id="resultKpis">
+                <div class="kpi-card">
+                    <i class="fas fa-boxes-stacked" style="font-size:1.4rem;color:var(--hd-orange)"></i>
+                    <span style="font-size:1.3rem;font-weight:700" id="rKpiSkus">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">THD Keys</div>
+                </div>
+                <div class="kpi-card">
+                    <i class="fas fa-cubes" style="font-size:1.4rem;color:var(--hd-blue)"></i>
+                    <span style="font-size:1.3rem;font-weight:700" id="rKpiUnits">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">Total Units</div>
+                </div>
+                <div class="kpi-card">
+                    <i class="fas fa-warehouse" style="font-size:1.4rem;color:var(--hd-green)"></i>
+                    <span style="font-size:1.3rem;font-weight:700" id="rKpiDcs">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">DCs Used</div>
+                </div>
+                <div class="kpi-card">
+                    <i class="fas fa-industry" style="font-size:1.4rem;color:var(--hd-red)"></i>
+                    <span style="font-size:1.3rem;font-weight:700" id="rKpiFactories">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">Factories</div>
+                </div>
+            </div>
+
+            <!-- Post-Allocation Validation -->
+            <div id="postValidation" style="margin-bottom:16px"></div>
+
+            <!-- Factory Container Summary (imports only) -->
+            <div id="factorySummarySection" style="display:none;margin-bottom:20px">
+                <h4 style="margin-bottom:10px"><i class="fas fa-industry"></i> Factory Container Summary</h4>
+                <div class="table-container" style="max-height:420px;overflow:auto">
+                    <table class="detail-table" id="factorySummaryTable">
+                        <thead>
+                            <tr>
+                                <th>Factory</th>
+                                <th style="text-align:right">PO Cube</th>
+                                <th style="text-align:right">Lane Count</th>
+                                <th style="text-align:right">Raw Container</th>
+                                <th style="text-align:right">Rounded Container</th>
+                                <th style="text-align:right">LCL Containers</th>
+                                <th style="text-align:right">LCL %</th>
+                                <th style="text-align:right">Util %</th>
+                                <th style="text-align:right">% Cumulative Containers</th>
+                            </tr>
+                        </thead>
+                        <tbody id="factorySummaryBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Results Table -->
+            <div class="detail-tools" style="margin-bottom:10px;display:flex;align-items:center;gap:12px">
+                <button class="btn btn-secondary" id="btnExportCSV"><i class="fas fa-file-csv"></i> Export CSV</button>
+                <span id="resultRecordCount" style="font-size:.82rem;color:var(--hd-medium-gray)"></span>
+            </div>
+            <div class="table-container">
+                <table class="detail-table" id="resultsTable">
+                    <thead><tr id="resultsHead"></tr></thead>
+                    <tbody id="resultsBody">
+                        <tr><td colspan="14" style="text-align:center;color:#666;padding:30px">No results loaded</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="pagination" id="resultsPagination"></div>
+        </div>
+        <div class="wizard-nav">
+            <button class="btn btn-secondary" onclick="goStep(7)"><i class="fas fa-arrow-left"></i> Back</button>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-inner">
+            <span>&copy; 2026 The Home Depot &mdash; Supply Chain Analytics</span>
+            <span>Assortment & Allocation Automation</span>
+        </div>
+    </footer>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="spinner"></div>
+        <p id="loadingText">Loading&hellip;</p>
+    </div>
+
+    <!-- Toast container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+    <script src="/static/js/app.js?v=300"></script>
+</body>
+</html>
