@@ -343,6 +343,15 @@ code {
   margin-left: 8px; color: var(--hd-orange); font-size: .72rem; font-weight: 600;
 }
 
+#step1EventNameSelect option.new-event-option {
+  color: var(--hd-orange);
+  font-weight: 700;
+}
+#step1EventNameCustom {
+  border-color: var(--hd-orange) !important;
+  background: #fff8f2;
+}
+
 .dc-filter-list {
   display: flex; flex-direction: column; gap: 6px;
 }

@@ -286,13 +286,23 @@
         // near-duplicate free-text variants like "Gift Center" vs "GIFT CTR"),
         // with an explicit "Other" escape hatch for a genuinely new event.
         if (select) {
+            const updatePriorYearAvailability = () => {
+                const isOther = select.value === "__other__";
+                const button = $("#btnCheckPriorStrategy");
+                const section = $("#priorStrategySection");
+                if (button) button.disabled = isOther;
+                if (isOther && section) {
+                    section.style.display = "none";
+                    section.innerHTML = "";
+                }
+            };
             try {
                 const res = await api("/api/known_event_names");
                 const names = res.event_names || [];
                 select.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join("")
-                    + `<option value="__other__">OTHER (NEW EVENT)…</option>`;
+                    + `<option value="__other__" class="new-event-option">ADD NEW EVENT…</option>`;
             } catch (e) {
-                select.innerHTML = `<option value="__other__">OTHER (NEW EVENT)…</option>`;
+                select.innerHTML = `<option value="__other__" class="new-event-option">ADD NEW EVENT…</option>`;
             }
             select.addEventListener("change", () => {
                 const isOther = select.value === "__other__";
@@ -300,7 +310,9 @@
                     customInput.style.display = isOther ? "block" : "none";
                     if (isOther) customInput.focus();
                 }
+                updatePriorYearAvailability();
             });
+            updatePriorYearAvailability();
             customInput?.addEventListener("input", () => {
                 customInput.value = customInput.value.toUpperCase();
             });
@@ -317,6 +329,10 @@
         }
 
         $("#btnCheckPriorStrategy")?.addEventListener("click", async () => {
+            if (select?.value === "__other__") {
+                toast("Last year's strategy is only available for an existing event", "error");
+                return;
+            }
             const name = currentEventName();
             const year = yearInput?.value?.trim();
             const section = $("#priorStrategySection");
