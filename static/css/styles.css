@@ -77,6 +77,60 @@ code {
   background: rgba(255,255,255,.12); display: flex; align-items: center; gap: 6px;
 }
 
+/* Prior-year strategy summary */
+.prior-strategy-card {
+  padding: 18px;
+  border: 1px solid #f0d2bd;
+  border-top: 4px solid var(--hd-orange);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+}
+.prior-strategy-heading {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; margin-bottom: 16px;
+}
+.prior-strategy-kicker {
+  color: var(--hd-medium-gray); font-size: .78rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.prior-strategy-heading h4 {
+  margin-top: 3px; font-size: 1.05rem; color: var(--hd-dark-gray);
+}
+.prior-strategy-heading h4 i { color: var(--hd-orange); }
+.prior-strategy-type {
+  padding: 5px 9px; border-radius: 14px;
+  background: #fff2e8; color: var(--hd-orange-dark);
+  font-size: .72rem; font-weight: 700; white-space: nowrap;
+}
+.prior-strategy-metrics {
+  display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr));
+  gap: 1px; overflow: hidden; border: 1px solid #f0e4dc;
+  border-radius: 6px; background: #f0e4dc;
+}
+.prior-strategy-metrics > div {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 11px 12px; background: #fff;
+}
+.prior-strategy-metrics span {
+  color: var(--hd-medium-gray); font-size: .7rem; font-weight: 600;
+}
+.prior-strategy-metrics strong {
+  color: var(--hd-dark-gray); font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.prior-strategy-details { margin-top: 16px; }
+.prior-strategy-details-title {
+  margin-bottom: 6px; color: var(--hd-dark-gray); font-size: .82rem; font-weight: 700;
+}
+.prior-strategy-detail-row {
+  display: grid; grid-template-columns: minmax(130px, .8fr) 90px minmax(180px, 2fr);
+  gap: 12px; align-items: center; padding: 7px 0;
+  border-top: 1px solid #f0e4dc; font-size: .78rem;
+}
+.prior-strategy-detail-row span { color: var(--hd-medium-gray); }
+.prior-strategy-detail-row small { color: var(--hd-dark-gray); }
+
 /* ── Wizard Stepper ───────────────────────────────────────────── */
 .stepper-section {
   max-width: 1100px; margin: 16px auto 0; padding: 0 24px;
@@ -503,4 +557,7 @@ code {
   .kpi-card { max-width: none; }
   .stepper { flex-wrap: wrap; gap: 8px; }
   .stepper::before { display: none; }
+  .prior-strategy-metrics { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+  .prior-strategy-detail-row { grid-template-columns: 1fr 70px; }
+  .prior-strategy-detail-row small { grid-column: 1 / -1; }
 }

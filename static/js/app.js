@@ -249,94 +249,32 @@
                 showLoading("Preparing Excel template...");
                 const resp = await fetch(url);
                 if (!resp.ok) throw new Error("Server returned status " + resp.status);
-                const blob = await resp.blob();
-                const blobUrl = URL.createObjectURL(blob);
-                const link = document.createElement("a");
-                link.href = blobUrl;
-                link.download = includesImports ? "sku_upload_template_import.xlsx" : "sku_upload_template_domestic.xlsx";
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(blobUrl);
-                toast("Template downloaded successfully!", "success");
-            } catch (err) {
-                toast("Failed to download template: " + err.message, "error");
-            } finally {
-                hideLoading();
-            }
-        });
-    }
-
-    // Step 1's "retrieve strategy if available" — shares last year's recorded
-    // snapshot (units/cube/DC breakdown) from the enterprise historical
-    // allocation table. This is display-only: acting on it (pre-filtering or
-    // greying Step 2's DC options) is a separate, not-yet-built step.
-    const fmtCube = v => v != null ? Number(v).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2}) : "—";
-
-    async function setupPriorYearStrategy() {
-        const select = $("#step1EventNameSelect");
-        const customInput = $("#step1EventNameCustom");
-        const yearInput = $("#step1EventYear");
-
-        // Default to the current calendar year — the user can still override
-        // (e.g. a forward-looking event like Patio planned a year ahead).
-        if (yearInput && !yearInput.value) yearInput.value = new Date().getFullYear();
-
-        // Dropdown of event names already in history (data governance — avoids
-        // near-duplicate free-text variants like "Gift Center" vs "GIFT CTR"),
-        // with an explicit "Other" escape hatch for a genuinely new event.
-        if (select) {
-            const updatePriorYearAvailability = () => {
-                const isOther = select.value === "__other__";
-                const button = $("#btnCheckPriorStrategy");
-                const section = $("#priorStrategySection");
-                if (button) button.disabled = isOther;
-                if (isOther && section) {
-                    section.style.display = "none";
-                    section.innerHTML = "";
+                const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
+                const strategyLabel = isVendorAligned ? "Vendor-Aligned Strategy" : (o.strategy_type || "Strategy Not Recorded");
+                const countLabel = isVendorAligned ? "Suppliers" : "Assortments";
+                const countValue = result.strategy_summary?.length || 0;
+                let html = `<div class="prior-strategy-card">
+                    <div class="prior-strategy-heading">
+                        <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}</span>
+                            <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
+                        <span class="prior-strategy-type">${o.strategy_type || "Not recorded"}</span>
+                    </div>
+                    <div class="prior-strategy-metrics">
+                        <div><span>${countLabel}</span><strong>${fmtNum(countValue)}</strong></div>
+                        <div><span>Total Units</span><strong>${fmtNum(o.total_units)}</strong></div>
+                        <div><span>Total Cube (ft&sup3;)</span><strong>${fmtCube(o.total_cube)}</strong></div>
+                        <div><span>Total THD Keys</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
+                        <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
+                    </div>`;
+                if (result.strategy_summary?.length) {
+                    html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
+                    for (const s of result.strategy_summary) {
+                        const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
+                        html += `<div class="prior-strategy-detail-row"><strong>${label}</strong><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><small>${s.dc_list || "—"}</small></div>`;
+                    }
+                    html += `</div>`;
                 }
-            };
-            try {
-                const res = await api("/api/known_event_names");
-                const names = res.event_names || [];
-                select.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join("")
-                    + `<option value="__other__" class="new-event-option">+ ADD A NEW EVENT…</option>`;
-            } catch (e) {
-                select.innerHTML = `<option value="__other__" class="new-event-option">+ ADD A NEW EVENT…</option>`;
-            }
-            select.addEventListener("change", () => {
-                const isOther = select.value === "__other__";
-                if (customInput) {
-                    customInput.style.display = isOther ? "block" : "none";
-                    if (isOther) customInput.focus();
-                }
-                updatePriorYearAvailability();
-            });
-            updatePriorYearAvailability();
-            customInput?.addEventListener("input", () => {
-                customInput.value = customInput.value.toUpperCase();
-            });
-        }
-
-        function currentEventName() {
-            if (select?.value === "__other__") {
-                // Uppercased for the same governance reason the dropdown exists —
-                // keeps a newly-typed name consistent with the canonical
-                // convention instead of introducing a stray-cased variant.
-                return (customInput?.value || "").trim().toUpperCase();
-            }
-            return select?.value || "";
-        }
-
-        $("#btnCheckPriorStrategy")?.addEventListener("click", async () => {
-            if (select?.value === "__other__") {
-                toast("Last year's strategy is only available for an existing event", "error");
-                return;
-            }
-            const name = currentEventName();
-            const year = yearInput?.value?.trim();
-            const section = $("#priorStrategySection");
-            if (!section) return;
+                html += `</div>`;
             if (!name || !year) {
                 toast("Enter an event name and year first", "error");
                 return;
