@@ -127,12 +127,13 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
 
     overall_rows = list(client.query(f"""
         WITH factory_dc AS (
-          SELECT THD_SKU_NBR, SKU_NBR, FACTORY_ID, DFC_UNITS, DFC_CUBE,
+          SELECT THD_SKU_NBR, SKU_NBR, FACTORY_ID, STRATEGY_TYPE, DFC_UNITS, DFC_CUBE,
                  {_CAMPUS_NORMALIZE_CASE} AS NORMALIZED_DC_NBR
           FROM {HISTORY_TABLE}
           WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
         )
-        SELECT SUM(DFC_UNITS) AS total_units, SUM(DFC_CUBE) AS total_cube,
+        SELECT ANY_VALUE(STRATEGY_TYPE) AS strategy_type,
+               SUM(DFC_UNITS) AS total_units, SUM(DFC_CUBE) AS total_cube,
                -- The SKU key alone can undercount too: confirmed on real Patio
                -- 2027 data that the same SKU can legitimately appear under more
                -- than one FACTORY_ID (8 did, out of 361) — each factory's
@@ -144,6 +145,41 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
                COUNT(DISTINCT NORMALIZED_DC_NBR) AS normalized_dc_count
         FROM factory_dc
     """, job_config=detail_job_config).result())
+
+    strategy_type = overall_rows[0].strategy_type
+    strategy_summary = []
+    if strategy_type and strategy_type.upper() == "VENDOR-ALIGNED":
+        vendor_rows = client.query(f"""
+            SELECT SUPPLIER AS vendor,
+                   COUNT(DISTINCT DC_NBR) AS dc_count,
+                   ARRAY_TO_STRING(ARRAY_AGG(DISTINCT CAST(DC_NBR AS STRING) ORDER BY CAST(DC_NBR AS STRING)), ', ') AS dc_list
+            FROM {HISTORY_TABLE}
+            WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
+              AND SUPPLIER IS NOT NULL
+            GROUP BY SUPPLIER
+            ORDER BY vendor
+        """, job_config=detail_job_config).result()
+        strategy_summary = [{
+            "vendor": r.vendor,
+            "dc_count": r.dc_count,
+            "dc_list": r.dc_list,
+        } for r in vendor_rows]
+    elif strategy_type:
+        asmt_rows = client.query(f"""
+            SELECT ASMT_ID AS asmt_id,
+                   COUNT(DISTINCT DC_NBR) AS dc_count,
+                   ARRAY_TO_STRING(ARRAY_AGG(DISTINCT CAST(DC_NBR AS STRING) ORDER BY CAST(DC_NBR AS STRING)), ', ') AS dc_list
+            FROM {HISTORY_TABLE}
+            WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
+              AND ASMT_ID IS NOT NULL
+            GROUP BY ASMT_ID
+            ORDER BY ASMT_ID
+        """, job_config=detail_job_config).result()
+        strategy_summary = [{
+            "asmt_id": r.asmt_id,
+            "dc_count": r.dc_count,
+            "dc_list": r.dc_list,
+        } for r in asmt_rows]
 
     by_dc_rows = list(client.query(f"""
         SELECT DC_NBR, ANY_VALUE(DC_NAME) AS DC_NAME,
@@ -264,12 +300,14 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
         "event_name": event_name,
         "event_year": latest_year,
         "overall": {
+            "strategy_type": strategy_type,
             "total_units": o.total_units,
             "total_cube": o.total_cube,
             "distinct_thd_keys": o.distinct_thd_keys,
             "normalized_dc_count": o.normalized_dc_count,
         },
         "tier_strategy": tier_strategy,
+        "strategy_summary": strategy_summary,
         "by_supplier": by_supplier,
         "by_dc": [
             {

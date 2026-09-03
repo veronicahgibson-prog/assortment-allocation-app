@@ -356,7 +356,7 @@
                 }
                 const o = result.overall;
                 let html = `<h4 style="margin:0 0 10px 0;font-size:.95rem">
-                    <i class="fas fa-clock-rotate-left"></i> ${result.event_name} ${result.event_year} — Last Recorded Strategy</h4>`;
+                    <i class="fas fa-clock-rotate-left"></i> ${result.event_name} ${result.event_year} — Last Recorded Strategy${o.strategy_type ? ` (${o.strategy_type})` : ""}</h4>`;
                 html += `<table class="detail-table" style="margin-bottom:10px">
                     <tr style="background:var(--hd-bg);font-weight:600">
                         <td>Units</td><td>Cube (ft&sup3;)</td><td>Total SKUs</td><td>DC Count</td></tr>
@@ -364,6 +364,18 @@
                         <td>${fmtNum(o.total_units)}</td><td>${fmtCube(o.total_cube)}</td>
                         <td>${fmtNum(o.distinct_thd_keys)}</td><td>${o.normalized_dc_count ?? "—"}</td></tr>
                     </table>`;
+                if (result.strategy_summary && result.strategy_summary.length) {
+                    const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
+                    html += `<h4 style="margin:14px 0 6px 0;font-size:.9rem">${isVendorAligned ? "Vendor DC Strategy" : "Assortment DC Strategy"}</h4>`;
+                    html += `<table class="detail-table" style="margin-bottom:10px"><thead><tr>
+                        <td>${isVendorAligned ? "Vendor" : "ASMT_ID"}</td>
+                        <td style="text-align:right">DC Count</td><td>DC Nbrs</td></tr></thead><tbody>`;
+                    for (const s of result.strategy_summary) {
+                        html += `<tr><td>${isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—")}</td>
+                            <td style="text-align:right">${s.dc_count ?? "—"}</td><td>${s.dc_list || "—"}</td></tr>`;
+                    }
+                    html += `</tbody></table>`;
+                }
                 // Tier strategy: one row per (DC-count tier, individual DC),
                 // matching the exact layout requested — Strategy | DC Tier |
                 // Campus Pairs Y/N | DC Nbr | DC Name | Units | Cube. Empty for
