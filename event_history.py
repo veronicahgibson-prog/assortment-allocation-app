@@ -96,16 +96,13 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
         bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
         bigquery.ScalarQueryParameter("max_year", "INT64", max_year),
     ]
-    # IS_IMPORT is NULL ("unknown") for most pre-2026 rows, since it's only
-    # derivable from FACTORY_ID being populated. Asymmetric handling on
-    # purpose: a domestic ask treats "unknown" as still-eligible (those old
-    # rows likely predate FACTORY_ID tracking entirely, not likely imports),
-    # but an import ask requires the explicit TRUE — we shouldn't claim
-    # something was an import just because we don't know it wasn't.
+    # Use the explicit flag for both event types. A Domestic request must not
+    # include NULL/unknown rows, because an event can contain separate import
+    # and domestic records in the same year.
     if is_import == "true":
         is_import_filter = "AND IS_IMPORT = TRUE"
     elif is_import == "false":
-        is_import_filter = "AND IS_IMPORT IS NOT TRUE"
+        is_import_filter = "AND IS_IMPORT = FALSE"
     else:
         is_import_filter = ""
 
