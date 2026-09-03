@@ -4,7 +4,7 @@ Backfilled with EVENT_NAME/EVENT_YEAR/IS_IMPORT this session; see
 alter_events_dfc_allocations.sql for the schema history.
 """
 from google.cloud import bigquery
-from config import DC_NAMES, CAMPUS_PAIRS
+from config import DC_NAMES, CAMPUS_PAIRS, EVENTS_SKU_LIST, VENDOR_STRATEGY
 
 HISTORY_TABLE = "`analytics-df-thd.CM_STAGE.EVENTS_SKU_DFC_ALLOCATIONS`"
 
@@ -29,6 +29,41 @@ def _dc_name(dc_nbr: int) -> str:
 
 def _dc_list_names(dc_list_key: str) -> str:
     return ", ".join(_dc_name(int(d)) for d in dc_list_key.split("-"))
+
+
+def _attach_vendor_strategy(client: bigquery.Client, supplier_rows) -> list:
+    """Pair each supplier with its VENDOR_ALIGNED_STRATEGY row so the DC count
+    and DC list shown are the vendor's aligned strategy, not whatever DCs the
+    historical rows happened to touch. Uses the same substring rule as
+    /api/match_vendor_strategy so Step 1 and Step 2 can't disagree about which
+    vendor a supplier belongs to."""
+    vs_rows = [dict(r) for r in client.query(
+        f"SELECT VENDOR, ASMT_ID, DC_COUNT, DC_LIST, DC_NM_LIST FROM {VENDOR_STRATEGY}"
+    ).result()]
+    other = next((v for v in vs_rows if (v["VENDOR"] or "").upper() == "OTHER"), None)
+
+    out = []
+    for r in supplier_rows:
+        supplier = r.SUPPLIER
+        sup_upper = supplier.upper().strip()
+        match = next(
+            (v for v in vs_rows if (v["VENDOR"] or "").upper().strip() in sup_upper),
+            None,
+        ) if supplier != "Unknown" else None
+        # "Unknown" means the SKU never appeared in an uploaded list for this
+        # event, so there's no supplier name to match on at all — distinct from
+        # a real supplier that simply has no vendor-specific strategy.
+        if match is None and supplier != "Unknown":
+            match = other
+        out.append({
+            "supplier": supplier,
+            "sku_count": r.SKU_COUNT,
+            "vendor": match["VENDOR"] if match else None,
+            "asmt_id": match["ASMT_ID"] if match else None,
+            "dc_count": match["DC_COUNT"] if match else None,
+            "dc_list": match["DC_LIST"] if match else None,
+        })
+    return out
 
 
 def fetch_known_event_names(client: bigquery.Client) -> list:
@@ -190,6 +225,44 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
             "has_variants": r.n_variants > 1,
         })
 
+    # Supplier-level strategy. The history table carries no supplier of its own
+    # and its ASMT_ID is NULL for every backfilled row, so there's no way to
+    # reach VENDOR_ALIGNED_STRATEGY from history directly — the supplier name
+    # has to come from this app's own uploaded SKU list for the same event and
+    # year, and is then matched to a vendor strategy by name.
+    # SAFE_CAST because the history SKU columns are STRING and genuinely
+    # contain non-numeric junk (e.g. "Onboarding"); a plain CAST errors the
+    # whole query out on those rows.
+    supplier_sku_rows = list(client.query(f"""
+        WITH hist AS (
+          SELECT SAFE_CAST({_sku_key} AS INT64) AS SKU_INT,
+                 CONCAT({_sku_key}, '|', COALESCE(CAST(FACTORY_ID AS STRING), 'NA')) AS THD_KEY
+          FROM {HISTORY_TABLE}
+          WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
+        ),
+        -- A SKU can be listed under either key, and ANY_VALUE collapses the
+        -- rare SKU that appears under two suppliers so the join can't
+        -- double-count it into both.
+        sku_supplier AS (
+          SELECT sku, ANY_VALUE(SUPPLIER) AS SUPPLIER
+          FROM (
+            SELECT SUPPLIER, sku
+            FROM {EVENTS_SKU_LIST}, UNNEST([THD_SKU_NBR, SKU_NBR]) AS sku
+            WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year
+              AND SUPPLIER IS NOT NULL AND sku IS NOT NULL
+          )
+          GROUP BY sku
+        )
+        SELECT COALESCE(s.SUPPLIER, 'Unknown') AS SUPPLIER,
+               COUNT(DISTINCT h.THD_KEY) AS SKU_COUNT
+        FROM hist h
+        LEFT JOIN sku_supplier s ON h.SKU_INT = s.sku
+        GROUP BY SUPPLIER
+        ORDER BY SKU_COUNT DESC, SUPPLIER
+    """, job_config=detail_job_config).result())
+
+    by_supplier = _attach_vendor_strategy(client, supplier_sku_rows)
+
     o = overall_rows[0]
     return {
         "found": True,
@@ -202,6 +275,7 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
             "normalized_dc_count": o.normalized_dc_count,
         },
         "tier_strategy": tier_strategy,
+        "by_supplier": by_supplier,
         "by_dc": [
             {
                 "dc_nbr": r.DC_NBR,

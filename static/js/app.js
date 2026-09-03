@@ -372,6 +372,30 @@
                         <td style="text-align:right">${fmtCube(d.cube)}</td></tr>`;
                 }
                 html += `</tbody></table>`;
+                // Supplier breakdown. Supplier isn't recorded in history — it's
+                // taken from the uploaded SKU list for the same event/year, then
+                // matched to VENDOR_ALIGNED_STRATEGY, so the DC count and list
+                // are the vendor's aligned strategy rather than the DCs the
+                // historical rows happened to use.
+                if (result.by_supplier && result.by_supplier.length) {
+                    html += `<h4 style="margin:14px 0 6px 0;font-size:.9rem">By Supplier</h4>`;
+                    html += `<table class="detail-table"><thead><tr>
+                        <td>Supplier</td><td style="text-align:right">SKU Count</td>
+                        <td>Vendor Strategy</td><td style="text-align:right">DC Count</td>
+                        <td>DC List</td></tr></thead><tbody>`;
+                    for (const s of result.by_supplier) {
+                        const isUnknown = s.supplier === "Unknown";
+                        html += `<tr${isUnknown ? ' style="color:#888"' : ""}>
+                            <td>${s.supplier}${isUnknown
+                                ? ' <span title="These SKUs aren\'t in an uploaded SKU list for this event, so no supplier name is available" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
+                                : ""}</td>
+                            <td style="text-align:right">${fmtNum(s.sku_count)}</td>
+                            <td>${s.vendor || "—"}${s.asmt_id ? ` <span style="color:#888">(${s.asmt_id})</span>` : ""}</td>
+                            <td style="text-align:right">${s.dc_count ?? "—"}</td>
+                            <td>${s.dc_list || "—"}</td></tr>`;
+                    }
+                    html += `</tbody></table>`;
+                }
                 section.innerHTML = html;
             } catch (e) {
                 toast("Failed to check prior year strategy: " + e.message, "error");
@@ -1245,7 +1269,7 @@
             const result = await api("/api/match_vendor_strategy", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ event_name: $("#paramEventName").value || eventName }),
+                body: JSON.stringify({ event_name: $("#paramEventName")?.value || eventName }),
             });
             if (result.error) throw new Error(result.error);
 
@@ -1264,6 +1288,7 @@
                 ${result.unmatched?.length ? `<br><span style="color:#c00">${result.unmatched.length} unmatched: ${result.unmatched.join(", ")}</span>` : ""}
             </div>`;
             $("#vendorMatchSummary").innerHTML = summary;
+            renderVendorSupplierSummary(vendorMatches, result.sku_count);
             $("#vendorMatchResult").style.display = "block";
             vendorStrategyConfirmed = false;
             $("#btnConfirmVendorStrategy").disabled = false;
@@ -1275,6 +1300,39 @@
         } finally {
             hideLoading();
         }
+    }
+
+    // Per-supplier rollup of the vendor-strategy match: SKU count comes from
+    // the uploaded template, DC count/list from the matched VENDOR_ALIGNED_STRATEGY
+    // row. Suppliers falling back to the "OTHER" vendor are flagged, since their
+    // DCs are a default rather than a real vendor-specific strategy.
+    function renderVendorSupplierSummary(matches, totalSkus) {
+        const box = $("#vendorSupplierSummary");
+        if (!box) return;
+        if (!matches.length) {
+            box.innerHTML = "";
+            return;
+        }
+        let html = `<h4 style="margin:0 0 6px 0;font-size:.9rem">
+            <i class="fas fa-boxes-stacked"></i> Supplier Summary</h4>`;
+        html += `<div class="table-container" style="max-height:300px;overflow-y:auto">
+            <table class="detail-table"><thead><tr>
+                <th>Supplier</th><th style="text-align:right">SKU Count</th>
+                <th style="text-align:right">DC Count</th><th>DC List</th>
+            </tr></thead><tbody>`;
+        for (const m of matches) {
+            const isOther = (m.VENDOR || "").toUpperCase() === "OTHER";
+            html += `<tr><td>${m.SUPPLIER}${isOther
+                    ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
+                    : ""}</td>
+                <td style="text-align:right">${fmtNum(m.SKU_COUNT)}</td>
+                <td style="text-align:right">${m.DC_COUNT}</td>
+                <td>${m.DC_LIST || "—"}</td></tr>`;
+        }
+        html += `</tbody><tfoot><tr style="font-weight:600;background:var(--hd-bg)">
+            <td>Total</td><td style="text-align:right">${fmtNum(totalSkus)}</td>
+            <td colspan="2"></td></tr></tfoot></table></div>`;
+        box.innerHTML = html;
     }
 
     let availableDcOptions = [];

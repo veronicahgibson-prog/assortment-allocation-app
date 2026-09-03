@@ -22,7 +22,7 @@ from config import (
     CONTAINER_DIVISOR, STRATEGY_KEYS, MAX_UPLOAD_MB,
     ALLOWED_DFCS, DC_NAMES, CATALOG_RUN_ANALYTICS,
 )
-from validators import validate_upload
+from validators import validate_upload, _determine_thd_key
 from assortment_engine import determine_assortment_ids, start_multi_dc, fetch_multi_dc_results
 from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_factory_summary
 from event_history import fetch_prior_year_strategy, fetch_known_event_names
@@ -931,15 +931,28 @@ def api_match_vendor_strategy():
 
     # Try upload cache first, fall back to BQ
     df = _upload_cache.get("df")
+    sku_counts = {}
     if df is not None and "SUPPLIER" in df.columns:
         suppliers = df["SUPPLIER"].dropna().unique().tolist()
+        # Count on THD_KEY, not THD_SKU_NBR: the same SKU legitimately appears
+        # on more than one row (different factory, buy pack, or wave), and
+        # counting the SKU number alone silently collapses those into one.
+        key_cols = [c for c in _determine_thd_key(df, _upload_cache.get("includes_imports", False))
+                    if c in df.columns]
+        work = df.dropna(subset=["SUPPLIER"]).copy()
+        work["_THD_KEY"] = work[key_cols].astype(str).agg("|".join, axis=1)
+        sku_counts = work.groupby("SUPPLIER")["_THD_KEY"].nunique().to_dict()
     elif event_name:
         try:
-            q = f"SELECT DISTINCT SUPPLIER FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev"
+            q = f"""SELECT SUPPLIER, COUNT(DISTINCT THD_SKU_NBR) AS SKU_COUNT
+                    FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev AND SUPPLIER IS NOT NULL
+                    GROUP BY SUPPLIER"""
             jc = bigquery.QueryJobConfig(query_parameters=[
                 bigquery.ScalarQueryParameter("ev", "STRING", event_name),
             ])
-            suppliers = [r.SUPPLIER for r in bq().query(q, job_config=jc).result() if r.SUPPLIER]
+            rows = list(bq().query(q, job_config=jc).result())
+            suppliers = [r.SUPPLIER for r in rows]
+            sku_counts = {r.SUPPLIER: r.SKU_COUNT for r in rows}
         except Exception as e:
             return jsonify({"error": f"Failed to read suppliers from BQ: {e}"}), 500
     else:
@@ -956,6 +969,7 @@ def api_match_vendor_strategy():
         unmatched = []
         for supplier in sorted(suppliers):
             sup_upper = supplier.upper().strip()
+            sku_count = int(sku_counts.get(supplier, 0))
             matched = False
             for v in vs_rows:
                 vendor_upper = v["VENDOR"].upper().strip()
@@ -967,6 +981,7 @@ def api_match_vendor_strategy():
                         "DC_COUNT": v["DC_COUNT"],
                         "DC_LIST": v["DC_LIST"],
                         "DC_NM_LIST": v["DC_NM_LIST"],
+                        "SKU_COUNT": sku_count,
                     })
                     matched = True
                     break
@@ -980,6 +995,7 @@ def api_match_vendor_strategy():
                         "DC_COUNT": other["DC_COUNT"],
                         "DC_LIST": other["DC_LIST"],
                         "DC_NM_LIST": other["DC_NM_LIST"],
+                        "SKU_COUNT": sku_count,
                     })
                 else:
                     unmatched.append(supplier)
@@ -991,6 +1007,7 @@ def api_match_vendor_strategy():
             "unmatched": unmatched,
             "strategy_count": len(unique_strategies),
             "supplier_count": len(suppliers),
+            "sku_count": sum(m["SKU_COUNT"] for m in matches),
         })
     except Exception as e:
         logger.exception("Match vendor strategy error")
