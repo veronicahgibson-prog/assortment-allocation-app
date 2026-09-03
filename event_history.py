@@ -165,14 +165,14 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
     # those, not an error.
     tier_dc_rows = list(client.query(f"""
         WITH factory_dc AS (
-          SELECT FACTORY_ID, DFC_UNITS, DFC_CUBE,
+          SELECT FACTORY_ID, STRATEGY_TYPE, DFC_UNITS, DFC_CUBE,
                  {_CAMPUS_NORMALIZE_CASE} AS NORMALIZED_DC_NBR
           FROM {HISTORY_TABLE}
           WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
             AND FACTORY_ID IS NOT NULL
         ),
         factory_list AS (
-          SELECT FACTORY_ID,
+          SELECT FACTORY_ID, ANY_VALUE(STRATEGY_TYPE) AS STRATEGY_TYPE,
                  COUNT(DISTINCT NORMALIZED_DC_NBR) AS DC_COUNT,
                  ARRAY_TO_STRING(
                    ARRAY_AGG(DISTINCT CAST(NORMALIZED_DC_NBR AS STRING) ORDER BY CAST(NORMALIZED_DC_NBR AS STRING)),
@@ -182,22 +182,23 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
           GROUP BY FACTORY_ID
         ),
         tier_lists AS (
-          SELECT DC_COUNT, DC_LIST_KEY, COUNT(*) AS N_FACTORIES,
-                 ROW_NUMBER() OVER (PARTITION BY DC_COUNT ORDER BY COUNT(*) DESC, DC_LIST_KEY) AS rn,
-                 COUNT(*) OVER (PARTITION BY DC_COUNT) AS n_variants
+             SELECT STRATEGY_TYPE, DC_COUNT, DC_LIST_KEY, COUNT(*) AS N_FACTORIES,
+                      ROW_NUMBER() OVER (PARTITION BY STRATEGY_TYPE, DC_COUNT ORDER BY COUNT(*) DESC, DC_LIST_KEY) AS rn,
+                      COUNT(*) OVER (PARTITION BY STRATEGY_TYPE, DC_COUNT) AS n_variants
           FROM factory_list
-          GROUP BY DC_COUNT, DC_LIST_KEY
+          GROUP BY STRATEGY_TYPE, DC_COUNT, DC_LIST_KEY
         ),
         canonical AS (
-          SELECT DC_COUNT, DC_LIST_KEY, N_FACTORIES, n_variants
+          SELECT STRATEGY_TYPE, DC_COUNT, DC_LIST_KEY, N_FACTORIES, n_variants
           FROM tier_lists WHERE rn = 1
         )
-        SELECT c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR AS DC_NBR,
+            SELECT c.STRATEGY_TYPE, c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR AS DC_NBR,
                SUM(fd.DFC_UNITS) AS UNITS, SUM(fd.DFC_CUBE) AS TOTAL_CUBE
-        FROM canonical c
-        JOIN factory_list fl ON fl.DC_COUNT = c.DC_COUNT AND fl.DC_LIST_KEY = c.DC_LIST_KEY
+                FROM canonical c
+                JOIN factory_list fl ON fl.STRATEGY_TYPE IS NOT DISTINCT FROM c.STRATEGY_TYPE
+                    AND fl.DC_COUNT = c.DC_COUNT AND fl.DC_LIST_KEY = c.DC_LIST_KEY
         JOIN factory_dc fd ON fd.FACTORY_ID = fl.FACTORY_ID
-        GROUP BY c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR
+            GROUP BY c.STRATEGY_TYPE, c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR
         ORDER BY c.DC_COUNT DESC, UNITS DESC
     """, job_config=detail_job_config).result())
 
@@ -205,10 +206,7 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
     for r in tier_dc_rows:
         tier_strategy.append({
             "dc_count": r.DC_COUNT,
-            # Inferred, not recorded: DC_COUNT == 1 reads as a single-DC
-            # strategy the same way this app's own strategy picker does.
-            # STRATEGY_TYPE itself is only populated going forward.
-            "strategy": "SINGLE - DC" if r.DC_COUNT == 1 else "MULTI - DC",
+            "strategy": r.STRATEGY_TYPE,
             # Y whenever this DC is the "main" side of a campus pair — the
             # only campus-pair signal available for backfilled history is
             # whether the data was folded at all, not a recorded user choice

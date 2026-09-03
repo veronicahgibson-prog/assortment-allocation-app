@@ -382,7 +382,7 @@
                         const newTier = t.dc_count !== lastTier;
                         lastTier = t.dc_count;
                         html += `<tr${newTier ? ' style="border-top:2px solid #ddd"' : ""}>
-                            <td>${t.strategy}</td>
+                            <td>${t.strategy || "—"}</td>
                             <td style="text-align:right">${t.dc_count}${t.has_variants
                                 ? ' <span title="Some factories at this tier used a different DC combination — totals reflect only the most common one" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
                                 : ""}</td>
