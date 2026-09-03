@@ -159,18 +159,17 @@
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- SECTION 5: INSERT TO BIGQUERY -->
+    <!-- SECTION 5: DATA STATUS -->
     <!-- ═══════════════════════════════════════════════════════════ -->
     <section class="wizard-panel" id="panel-5">
         <div class="card">
-            <h3><i class="fas fa-database"></i> Step 5: Insert to BigQuery</h3>
+            <h3><i class="fas fa-database"></i> Step 5: Data Status</h3>
             <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
-                Confirm this is the SKU list you would like to use. Once inserted,
-                the data will be written to <code>CM_STAGE.EVENTS_SKU_LIST</code>
-                with computed columns (SKU_BUY_CUBE, SKU_LEVEL_CONTAINERS, timestamps).
+                Valid files are automatically written to <code>CM_STAGE.EVENTS_SKU_LIST</code>
+                with computed columns before you continue to the assortment workflow.
             </p>
             <div id="insertStatus" style="display:none;margin-bottom:12px"></div>
-            <button class="btn btn-success" id="btnInsert">
+            <button class="btn btn-success" id="btnInsert" style="display:none">
                 <i class="fas fa-cloud-arrow-up"></i> Insert to BigQuery
             </button>
             <button class="btn btn-secondary" id="btnReplaceInsert" style="display:none;margin-left:8px;background:#856404;color:#fff;border-color:#856404">
@@ -465,6 +464,7 @@
 
                 <!-- Success Summary -->
                 <div id="successSection" style="display:none;margin-top:12px">
+                    <div id="autoInsertStatus" style="display:none;margin-bottom:12px"></div>
                     <div id="thdKeyInfo" style="display:none;margin-bottom:10px;padding:8px 12px;background:#f5f5f5;border-radius:6px;font-size:.82rem">
                         <strong>THD_KEY:</strong> <span id="thdKeyLabel"></span>
                     </div>

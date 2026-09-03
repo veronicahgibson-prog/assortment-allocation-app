@@ -907,7 +907,9 @@ def insert_to_bq():
         job.result()
         rows_inserted = job.num_dml_affected_rows or row_count
 
-        _upload_cache.clear()
+        # Keep the validated frame available for vendor matching and SKU-level
+        # DC overrides after the event has been inserted.
+        _upload_cache.pop("validation_table", None)
         return jsonify({
             "success": True,
             "message": f"Inserted {rows_inserted} enriched rows into EVENTS_SKU_LIST.",

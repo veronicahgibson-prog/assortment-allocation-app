@@ -452,6 +452,7 @@
         try {
             const result = await api("/api/upload", { method: "POST", body: formData });
             displayValidation(result);
+            if (result.passed && !result.import_mismatch) await doInsert(false);
         } catch (e) {
             toast("Upload failed: " + e.message, "error");
         } finally {
@@ -729,11 +730,13 @@
                 body: JSON.stringify({ container_divisor: getContainerDivisor(), overwrite }),
             });
             if (result.success) {
-                $("#insertStatus").style.display = "block";
-                $("#insertStatus").innerHTML = `
+                const statusHtml = `
                     <div class="validation-badge badge-pass">
                         <i class="fas fa-check-circle"></i> ${result.message}
                     </div>`;
+                [$("#insertStatus"), $("#autoInsertStatus")].forEach(status => {
+                    if (status) { status.style.display = "block"; status.innerHTML = statusHtml; }
+                });
                 $("#btnGoStrategy").disabled = false;
                 $("#btnInsert").disabled = true;
                 const replaceBtn = $("#btnReplaceInsert");
@@ -741,11 +744,19 @@
                 toast("Data inserted successfully!", "success");
             } else if (result.exists) {
                 // Event already exists — show replace option
-                $("#insertStatus").style.display = "block";
-                $("#insertStatus").innerHTML = `
+                const statusHtml = `
                     <div class="validation-badge badge-warn" style="background:#fff3cd;color:#856404;border:1px solid #ffc107">
                         <i class="fas fa-exclamation-triangle"></i> ${result.message}
+                        <button class="btn btn-secondary auto-replace-insert" style="margin-left:10px;background:#856404;color:#fff;border-color:#856404">
+                            <i class="fas fa-rotate"></i> Replace Existing Data
+                        </button>
                     </div>`;
+                [$("#insertStatus"), $("#autoInsertStatus")].forEach(status => {
+                    if (status) { status.style.display = "block"; status.innerHTML = statusHtml; }
+                });
+                document.querySelectorAll(".auto-replace-insert").forEach(button => {
+                    button.addEventListener("click", () => doInsert(true));
+                });
                 $("#btnInsert").disabled = true;
                 const replaceBtn = $("#btnReplaceInsert");
                 if (replaceBtn) replaceBtn.style.display = "inline-flex";
@@ -754,11 +765,13 @@
                 throw new Error(result.error || "Insert failed");
             }
         } catch (e) {
-            $("#insertStatus").style.display = "block";
-            $("#insertStatus").innerHTML = `
+            const statusHtml = `
                 <div class="validation-badge badge-fail">
                     <i class="fas fa-times-circle"></i> ${e.message}
                 </div>`;
+            [$("#insertStatus"), $("#autoInsertStatus")].forEach(status => {
+                if (status) { status.style.display = "block"; status.innerHTML = statusHtml; }
+            });
             toast("Insert failed: " + e.message, "error");
         } finally {
             hideLoading();
