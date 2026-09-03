@@ -115,7 +115,7 @@ def api_config():
 
 # ── Section 1: Template Download ────────────────────────────────────
 
-def _build_template(columns, filename):
+def _build_template(columns, filename, event_name="", event_year=""):
     wb = Workbook()
     ws = wb.active
     ws.title = "SKU Upload Template"
@@ -149,6 +149,11 @@ def _build_template(columns, filename):
         if col["required"] or col.get("note"):
             cell.fill = req_fill
 
+    if event_name or event_year:
+        ws.cell(row=3, column=1, value=event_name or None)
+        if len(columns) > 1 and columns[1]["name"] == "EVENT_YEAR":
+            ws.cell(row=3, column=2, value=int(event_year) if str(event_year).isdigit() else event_year or None)
+
     ws.freeze_panes = "A3"
 
     buf = io.BytesIO()
@@ -165,9 +170,11 @@ def _build_template(columns, filename):
 @app.route("/api/download_template")
 def download_template():
     includes_imports = request.args.get("imports", "false").lower() == "true"
+    event_name = request.args.get("event_name", "").strip()
+    event_year = request.args.get("event_year", "").strip()
     if includes_imports:
-        return _build_template(TEMPLATE_COLUMNS_IMPORT, "sku_upload_template_import.xlsx")
-    return _build_template(TEMPLATE_COLUMNS_DOMESTIC, "sku_upload_template_domestic.xlsx")
+        return _build_template(TEMPLATE_COLUMNS_IMPORT, "sku_upload_template_import.xlsx", event_name, event_year)
+    return _build_template(TEMPLATE_COLUMNS_DOMESTIC, "sku_upload_template_domestic.xlsx", event_name, event_year)
 
 
 @app.route("/api/upload_status")

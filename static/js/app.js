@@ -202,7 +202,7 @@
                 descText.innerHTML = includesImports ? "*requires Factory ID" : "";
             }
             if (btnText) {
-                btnText.innerHTML = `<i class="fas fa-download"></i> Download Template`;
+                btnText.innerHTML = `<i class="fas fa-download"></i> Download`;
             }
         }
 
@@ -229,7 +229,16 @@
         $("#btnDownloadTemplate")?.addEventListener("click", async (e) => {
             e.preventDefault();
             includesImports = document.querySelector('input[name="importToggle"]:checked')?.value === "true";
-            const url = `/api/download_template?imports=${includesImports}&_t=${Date.now()}`;
+            const eventSelect = $("#step1EventNameSelect");
+            const eventCustom = $("#step1EventNameCustom");
+            const selectedEvent = eventSelect?.value === "__other__" ? eventCustom?.value : eventSelect?.value;
+            const params = new URLSearchParams({
+                imports: String(includesImports),
+                event_name: (selectedEvent || "").trim().toUpperCase(),
+                event_year: $("#step1EventYear")?.value?.trim() || "",
+                _t: String(Date.now()),
+            });
+            const url = `/api/download_template?${params}`;
             try {
                 showLoading("Preparing Excel template...");
                 const resp = await fetch(url);
@@ -275,9 +284,9 @@
                 const res = await api("/api/known_event_names");
                 const names = res.event_names || [];
                 select.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join("")
-                    + `<option value="__other__">Other (new event)…</option>`;
+                    + `<option value="__other__">OTHER (NEW EVENT)…</option>`;
             } catch (e) {
-                select.innerHTML = `<option value="__other__">Other (new event)…</option>`;
+                select.innerHTML = `<option value="__other__">OTHER (NEW EVENT)…</option>`;
             }
             select.addEventListener("change", () => {
                 const isOther = select.value === "__other__";
@@ -285,6 +294,9 @@
                     customInput.style.display = isOther ? "block" : "none";
                     if (isOther) customInput.focus();
                 }
+            });
+            customInput?.addEventListener("input", () => {
+                customInput.value = customInput.value.toUpperCase();
             });
         }
 
