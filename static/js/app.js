@@ -1374,10 +1374,10 @@
             match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
             const defaultDcs = parseVendorDcs(match.DC_LIST);
             let html = `<table class="detail-table vendor-sku-table"><thead><tr>
-                <th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
+                <th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
             result.rows.forEach(row => {
                 const selectedDcs = vendorSkuDcs(match, row);
-                html += `<tr><td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td>
+                html += `<tr><td>${(match.VENDOR || match.SUPPLIER || "").toUpperCase()}</td><td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td>
                     <td class="vendor-sku-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
                 defaultDcs.forEach((dcNbr, dcIndex) => {
                     const name = vendorDcName(dcNbr, parseVendorNames(match._initialDcNames), dcIndex);
@@ -1386,7 +1386,7 @@
                 });
                 html += `</div>${match.SKU_OVERRIDES[row.THD_KEY] ? '<span class="vendor-sku-override">Override</span>' : ""}</td></tr>`;
             });
-            html += `</tbody></table><div class="vendor-sku-footer">Page ${result.page} of ${result.pages || 1} · ${result.total} SKU(s)`;
+            html += `</tbody></table><div class="vendor-sku-footer"><button type="button" class="btn btn-sm btn-secondary vendor-sku-hide"><i class="fas fa-chevron-up"></i> Hide SKUs</button> Page ${result.page} of ${result.pages || 1} · ${result.total} SKU(s)`;
             if (result.pages > 1) {
                 html += `<button type="button" class="btn btn-sm btn-secondary vendor-sku-next" data-match-index="${matchIndex}" data-page="${result.page + 1}" ${result.page >= result.pages ? "disabled" : ""}>Next</button>`;
             }
@@ -1400,6 +1400,7 @@
             container.querySelector(".vendor-sku-next")?.addEventListener("click", event => {
                 loadVendorSkuRows(matchIndex, Number(event.currentTarget.dataset.page));
             });
+            container.querySelector(".vendor-sku-hide")?.addEventListener("click", () => toggleVendorSkuRows(matchIndex));
         } catch (error) {
             container.innerHTML = `<div class="vendor-sku-loading">Unable to load SKU details: ${error.message}</div>`;
         }
@@ -1446,6 +1447,10 @@
             const selectedDcs = parseVendorDcs(m.DC_LIST);
             const initialDcs = parseVendorDcs(m._initialDcList);
             const names = parseVendorNames(m._initialDcNames);
+            if (vendorSkuExpanded.has(matchIndex)) {
+                html += `<tr class="vendor-sku-detail-row"><td colspan="4"><div id="vendor-skus-${matchIndex}" class="vendor-sku-details"></div></td></tr>`;
+                return;
+            }
             const matchedVendor = (m.VENDOR || m.SUPPLIER || "").toUpperCase();
             html += `<tr><td style="text-align:right"><div>${fmtNum(m.SKU_COUNT)}</div>
                 <button type="button" class="btn btn-sm btn-secondary vendor-sku-toggle" data-match-index="${matchIndex}">
@@ -1453,7 +1458,7 @@
                 </button></td>
                 <td><strong>${matchedVendor}${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
-                    : ""}</strong><br><span class="vendor-dc-meta">Uploaded supplier: ${m.SUPPLIER || "—"}</span></td>
+                    : ""}</strong></td>
                 <td class="vendor-dc-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
             initialDcs.forEach((dcNbr, dcIndex) => {
                 const name = vendorDcName(dcNbr, names, dcIndex);
@@ -1461,9 +1466,6 @@
                     title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-dc-nbr="${dcNbr}">${dcNbr}</button>`;
             });
             html += `</div></td></tr>`;
-            if (vendorSkuExpanded.has(matchIndex)) {
-                html += `<tr class="vendor-sku-detail-row"><td colspan="4"><div id="vendor-skus-${matchIndex}" class="vendor-sku-details"></div></td></tr>`;
-            }
         });
         html += `</tbody><tfoot><tr><td colspan="4" class="vendor-dc-total">Total matched THD Keys: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))}</td></tr></tfoot></table></div>`;
         box.innerHTML = html;

@@ -315,16 +315,16 @@ code {
   font-size: .78rem;
   background: #fff;
 }
-.vendor-sku-table th:nth-child(3),
-.vendor-sku-table td:nth-child(3),
 .vendor-sku-table th:nth-child(4),
-.vendor-sku-table td:nth-child(4),
 .vendor-sku-table th:nth-child(5),
-.vendor-sku-table td:nth-child(5) {
+.vendor-sku-table td:nth-child(4),
+.vendor-sku-table td:nth-child(5),
+.vendor-sku-table th:nth-child(6),
+.vendor-sku-table td:nth-child(6) {
   text-align: right;
   white-space: nowrap;
 }
-.vendor-sku-table td:nth-child(6) {
+.vendor-sku-table td:nth-child(7) {
   min-width: 240px;
 }
 .vendor-sku-table .vendor-dc-btn {
