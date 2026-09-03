@@ -300,9 +300,9 @@
                 const res = await api("/api/known_event_names");
                 const names = res.event_names || [];
                 select.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join("")
-                    + `<option value="__other__" class="new-event-option">ADD NEW EVENT…</option>`;
+                    + `<option value="__other__" class="new-event-option">+ ADD A NEW EVENT…</option>`;
             } catch (e) {
-                select.innerHTML = `<option value="__other__" class="new-event-option">ADD NEW EVENT…</option>`;
+                select.innerHTML = `<option value="__other__" class="new-event-option">+ ADD A NEW EVENT…</option>`;
             }
             select.addEventListener("change", () => {
                 const isOther = select.value === "__other__";
