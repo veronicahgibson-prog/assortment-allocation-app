@@ -77,6 +77,60 @@ code {
   background: rgba(255,255,255,.12); display: flex; align-items: center; gap: 6px;
 }
 
+/* Prior-year strategy summary */
+.prior-strategy-card {
+  padding: 18px;
+  border: 1px solid #f0d2bd;
+  border-top: 4px solid var(--hd-orange);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+}
+.prior-strategy-heading {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; margin-bottom: 16px;
+}
+.prior-strategy-kicker {
+  color: var(--hd-medium-gray); font-size: .78rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.prior-strategy-heading h4 {
+  margin-top: 3px; font-size: 1.05rem; color: var(--hd-dark-gray);
+}
+.prior-strategy-heading h4 i { color: var(--hd-orange); }
+.prior-strategy-type {
+  padding: 5px 9px; border-radius: 14px;
+  background: #fff2e8; color: var(--hd-orange-dark);
+  font-size: .72rem; font-weight: 700; white-space: nowrap;
+}
+.prior-strategy-metrics {
+  display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr));
+  gap: 1px; overflow: hidden; border: 1px solid #f0e4dc;
+  border-radius: 6px; background: #f0e4dc;
+}
+.prior-strategy-metrics > div {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 11px 12px; background: #fff;
+}
+.prior-strategy-metrics span {
+  color: var(--hd-medium-gray); font-size: .7rem; font-weight: 600;
+}
+.prior-strategy-metrics strong {
+  color: var(--hd-dark-gray); font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.prior-strategy-details { margin-top: 16px; }
+.prior-strategy-details-title {
+  margin-bottom: 6px; color: var(--hd-dark-gray); font-size: .82rem; font-weight: 700;
+}
+.prior-strategy-detail-row {
+  display: grid; grid-template-columns: minmax(130px, .8fr) 90px minmax(180px, 2fr);
+  gap: 12px; align-items: center; padding: 7px 0;
+  border-top: 1px solid #f0e4dc; font-size: .78rem;
+}
+.prior-strategy-detail-row span { color: var(--hd-medium-gray); }
+.prior-strategy-detail-row small { color: var(--hd-dark-gray); }
+
 /* ── Wizard Stepper ───────────────────────────────────────────── */
 .stepper-section {
   max-width: 1100px; margin: 16px auto 0; padding: 0 24px;
@@ -255,6 +309,103 @@ code {
   color: #fff;
 }
 
+.vendor-dc-help {
+  margin: 0 0 10px;
+  color: var(--hd-medium-gray);
+  font-size: .82rem;
+}
+.vendor-dc-list {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 300px; overflow-y: auto;
+}
+.vendor-dc-table-wrap {
+  max-height: 300px;
+  overflow-y: auto;
+}
+.vendor-dc-table th:nth-child(1),
+.vendor-dc-table th:nth-child(3),
+.vendor-dc-table td:nth-child(1),
+.vendor-dc-table td:nth-child(3) {
+  text-align: right;
+  white-space: nowrap;
+}
+.vendor-dc-table td:nth-child(4) {
+  min-width: 260px;
+}
+.vendor-dc-card {
+  padding: 10px 12px;
+  border: 1px solid var(--hd-light-gray);
+  border-radius: var(--radius);
+  background: #fff;
+}
+.vendor-dc-heading {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 8px;
+}
+.vendor-dc-meta, .vendor-dc-total {
+  color: var(--hd-medium-gray); font-size: .82rem;
+}
+.vendor-dc-buttons {
+  display: flex; flex-wrap: wrap; gap: 7px;
+}
+.vendor-dc-btn {
+  width: 48px; height: 36px; font-size: .82rem;
+}
+.vendor-dc-total {
+  margin-top: 8px; font-weight: 600;
+}
+.vendor-sku-toggle {
+  margin-top: 6px;
+  font-size: .72rem;
+}
+.vendor-sku-detail-row td {
+  padding: 8px 12px 12px;
+  background: #f8f8f8;
+}
+.vendor-sku-details {
+  overflow-x: auto;
+}
+.vendor-sku-table {
+  font-size: .78rem;
+  background: #fff;
+}
+.vendor-sku-table th:nth-child(4),
+.vendor-sku-table th:nth-child(5),
+.vendor-sku-table td:nth-child(4),
+.vendor-sku-table td:nth-child(5),
+.vendor-sku-table th:nth-child(6),
+.vendor-sku-table td:nth-child(6) {
+  text-align: right;
+  white-space: nowrap;
+}
+.vendor-sku-table td:nth-child(7) {
+  min-width: 240px;
+}
+.vendor-sku-table .vendor-dc-btn {
+  width: 44px; height: 32px; font-size: .72rem;
+}
+.vendor-sku-loading {
+  padding: 10px;
+  color: var(--hd-medium-gray);
+  font-size: .8rem;
+}
+.vendor-sku-footer {
+  display: flex; align-items: center; gap: 10px;
+  padding-top: 8px; color: var(--hd-medium-gray); font-size: .78rem;
+}
+.vendor-sku-override {
+  margin-left: 8px; color: var(--hd-orange); font-size: .72rem; font-weight: 600;
+}
+
+#step1EventNameSelect option.new-event-option {
+  color: var(--hd-orange);
+  font-weight: 700;
+}
+#step1EventNameCustom {
+  border-color: var(--hd-orange) !important;
+  background: #fff8f2;
+}
+
 .dc-filter-list {
   display: flex; flex-direction: column; gap: 6px;
 }
@@ -406,4 +557,7 @@ code {
   .kpi-card { max-width: none; }
   .stepper { flex-wrap: wrap; gap: 8px; }
   .stepper::before { display: none; }
+  .prior-strategy-metrics { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+  .prior-strategy-detail-row { grid-template-columns: 1fr 70px; }
+  .prior-strategy-detail-row small { grid-column: 1 / -1; }
 }

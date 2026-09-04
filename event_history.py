@@ -96,16 +96,13 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
         bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
         bigquery.ScalarQueryParameter("max_year", "INT64", max_year),
     ]
-    # IS_IMPORT is NULL ("unknown") for most pre-2026 rows, since it's only
-    # derivable from FACTORY_ID being populated. Asymmetric handling on
-    # purpose: a domestic ask treats "unknown" as still-eligible (those old
-    # rows likely predate FACTORY_ID tracking entirely, not likely imports),
-    # but an import ask requires the explicit TRUE — we shouldn't claim
-    # something was an import just because we don't know it wasn't.
+    # Use the explicit flag for both event types. A Domestic request must not
+    # include NULL/unknown rows, because an event can contain separate import
+    # and domestic records in the same year.
     if is_import == "true":
         is_import_filter = "AND IS_IMPORT = TRUE"
     elif is_import == "false":
-        is_import_filter = "AND IS_IMPORT IS NOT TRUE"
+        is_import_filter = "AND IS_IMPORT = FALSE"
     else:
         is_import_filter = ""
 
@@ -130,12 +127,13 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
 
     overall_rows = list(client.query(f"""
         WITH factory_dc AS (
-          SELECT THD_SKU_NBR, SKU_NBR, FACTORY_ID, DFC_UNITS, DFC_CUBE,
+          SELECT THD_SKU_NBR, SKU_NBR, FACTORY_ID, STRATEGY_TYPE, DFC_UNITS, DFC_CUBE,
                  {_CAMPUS_NORMALIZE_CASE} AS NORMALIZED_DC_NBR
           FROM {HISTORY_TABLE}
           WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
         )
-        SELECT SUM(DFC_UNITS) AS total_units, SUM(DFC_CUBE) AS total_cube,
+        SELECT ANY_VALUE(STRATEGY_TYPE) AS strategy_type,
+               SUM(DFC_UNITS) AS total_units, SUM(DFC_CUBE) AS total_cube,
                -- The SKU key alone can undercount too: confirmed on real Patio
                -- 2027 data that the same SKU can legitimately appear under more
                -- than one FACTORY_ID (8 did, out of 361) — each factory's
@@ -147,6 +145,41 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
                COUNT(DISTINCT NORMALIZED_DC_NBR) AS normalized_dc_count
         FROM factory_dc
     """, job_config=detail_job_config).result())
+
+    strategy_type = overall_rows[0].strategy_type
+    strategy_summary = []
+    if strategy_type and strategy_type.upper() == "VENDOR-ALIGNED":
+        vendor_rows = client.query(f"""
+            SELECT SUPPLIER AS vendor,
+                   COUNT(DISTINCT DC_NBR) AS dc_count,
+                   ARRAY_TO_STRING(ARRAY_AGG(DISTINCT CAST(DC_NBR AS STRING) ORDER BY CAST(DC_NBR AS STRING)), ', ') AS dc_list
+            FROM {HISTORY_TABLE}
+            WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
+              AND SUPPLIER IS NOT NULL
+            GROUP BY SUPPLIER
+            ORDER BY vendor
+        """, job_config=detail_job_config).result()
+        strategy_summary = [{
+            "vendor": r.vendor,
+            "dc_count": r.dc_count,
+            "dc_list": r.dc_list,
+        } for r in vendor_rows]
+    elif strategy_type:
+        asmt_rows = client.query(f"""
+            SELECT ASMT_ID AS asmt_id,
+                   COUNT(DISTINCT DC_NBR) AS dc_count,
+                   ARRAY_TO_STRING(ARRAY_AGG(DISTINCT CAST(DC_NBR AS STRING) ORDER BY CAST(DC_NBR AS STRING)), ', ') AS dc_list
+            FROM {HISTORY_TABLE}
+            WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
+              AND ASMT_ID IS NOT NULL
+            GROUP BY ASMT_ID
+            ORDER BY ASMT_ID
+        """, job_config=detail_job_config).result()
+        strategy_summary = [{
+            "asmt_id": r.asmt_id,
+            "dc_count": r.dc_count,
+            "dc_list": r.dc_list,
+        } for r in asmt_rows]
 
     by_dc_rows = list(client.query(f"""
         SELECT DC_NBR, ANY_VALUE(DC_NAME) AS DC_NAME,
@@ -168,14 +201,14 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
     # those, not an error.
     tier_dc_rows = list(client.query(f"""
         WITH factory_dc AS (
-          SELECT FACTORY_ID, DFC_UNITS, DFC_CUBE,
+          SELECT FACTORY_ID, STRATEGY_TYPE, DFC_UNITS, DFC_CUBE,
                  {_CAMPUS_NORMALIZE_CASE} AS NORMALIZED_DC_NBR
           FROM {HISTORY_TABLE}
           WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
             AND FACTORY_ID IS NOT NULL
         ),
         factory_list AS (
-          SELECT FACTORY_ID,
+          SELECT FACTORY_ID, ANY_VALUE(STRATEGY_TYPE) AS STRATEGY_TYPE,
                  COUNT(DISTINCT NORMALIZED_DC_NBR) AS DC_COUNT,
                  ARRAY_TO_STRING(
                    ARRAY_AGG(DISTINCT CAST(NORMALIZED_DC_NBR AS STRING) ORDER BY CAST(NORMALIZED_DC_NBR AS STRING)),
@@ -185,22 +218,23 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
           GROUP BY FACTORY_ID
         ),
         tier_lists AS (
-          SELECT DC_COUNT, DC_LIST_KEY, COUNT(*) AS N_FACTORIES,
-                 ROW_NUMBER() OVER (PARTITION BY DC_COUNT ORDER BY COUNT(*) DESC, DC_LIST_KEY) AS rn,
-                 COUNT(*) OVER (PARTITION BY DC_COUNT) AS n_variants
+             SELECT STRATEGY_TYPE, DC_COUNT, DC_LIST_KEY, COUNT(*) AS N_FACTORIES,
+                      ROW_NUMBER() OVER (PARTITION BY STRATEGY_TYPE, DC_COUNT ORDER BY COUNT(*) DESC, DC_LIST_KEY) AS rn,
+                      COUNT(*) OVER (PARTITION BY STRATEGY_TYPE, DC_COUNT) AS n_variants
           FROM factory_list
-          GROUP BY DC_COUNT, DC_LIST_KEY
+          GROUP BY STRATEGY_TYPE, DC_COUNT, DC_LIST_KEY
         ),
         canonical AS (
-          SELECT DC_COUNT, DC_LIST_KEY, N_FACTORIES, n_variants
+          SELECT STRATEGY_TYPE, DC_COUNT, DC_LIST_KEY, N_FACTORIES, n_variants
           FROM tier_lists WHERE rn = 1
         )
-        SELECT c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR AS DC_NBR,
+            SELECT c.STRATEGY_TYPE, c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR AS DC_NBR,
                SUM(fd.DFC_UNITS) AS UNITS, SUM(fd.DFC_CUBE) AS TOTAL_CUBE
-        FROM canonical c
-        JOIN factory_list fl ON fl.DC_COUNT = c.DC_COUNT AND fl.DC_LIST_KEY = c.DC_LIST_KEY
+                FROM canonical c
+                JOIN factory_list fl ON fl.STRATEGY_TYPE IS NOT DISTINCT FROM c.STRATEGY_TYPE
+                    AND fl.DC_COUNT = c.DC_COUNT AND fl.DC_LIST_KEY = c.DC_LIST_KEY
         JOIN factory_dc fd ON fd.FACTORY_ID = fl.FACTORY_ID
-        GROUP BY c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR
+            GROUP BY c.STRATEGY_TYPE, c.DC_COUNT, c.N_FACTORIES, c.n_variants, fd.NORMALIZED_DC_NBR
         ORDER BY c.DC_COUNT DESC, UNITS DESC
     """, job_config=detail_job_config).result())
 
@@ -208,10 +242,7 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
     for r in tier_dc_rows:
         tier_strategy.append({
             "dc_count": r.DC_COUNT,
-            # Inferred, not recorded: DC_COUNT == 1 reads as a single-DC
-            # strategy the same way this app's own strategy picker does.
-            # STRATEGY_TYPE itself is only populated going forward.
-            "strategy": "SINGLE - DC" if r.DC_COUNT == 1 else "MULTI - DC",
+            "strategy": r.STRATEGY_TYPE,
             # Y whenever this DC is the "main" side of a campus pair — the
             # only campus-pair signal available for backfilled history is
             # whether the data was folded at all, not a recorded user choice
@@ -269,12 +300,14 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
         "event_name": event_name,
         "event_year": latest_year,
         "overall": {
+            "strategy_type": strategy_type,
             "total_units": o.total_units,
             "total_cube": o.total_cube,
             "distinct_thd_keys": o.distinct_thd_keys,
             "normalized_dc_count": o.normalized_dc_count,
         },
         "tier_strategy": tier_strategy,
+        "strategy_summary": strategy_summary,
         "by_supplier": by_supplier,
         "by_dc": [
             {

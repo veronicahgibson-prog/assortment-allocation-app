@@ -202,7 +202,7 @@
                 descText.innerHTML = includesImports ? "*requires Factory ID" : "";
             }
             if (btnText) {
-                btnText.innerHTML = `<i class="fas fa-download"></i> Download Template`;
+                btnText.innerHTML = `<i class="fas fa-download"></i> Download`;
             }
         }
 
@@ -229,80 +229,52 @@
         $("#btnDownloadTemplate")?.addEventListener("click", async (e) => {
             e.preventDefault();
             includesImports = document.querySelector('input[name="importToggle"]:checked')?.value === "true";
-            const url = `/api/download_template?imports=${includesImports}&_t=${Date.now()}`;
+            const eventSelect = $("#step1EventNameSelect");
+            const eventCustom = $("#step1EventNameCustom");
+            const selectedEvent = eventSelect?.value === "__other__" ? eventCustom?.value : eventSelect?.value;
+            const eventNameValue = (selectedEvent || eventName || "").trim().toUpperCase();
+            const eventYearValue = $("#step1EventYear")?.value?.trim() || String(eventYear || "");
+            if (!eventNameValue || !eventYearValue) {
+                toast("Enter an Event Name and Event Year before downloading", "error");
+                return;
+            }
+            const params = new URLSearchParams({
+                imports: String(includesImports),
+                event_name: eventNameValue,
+                event_year: eventYearValue,
+                _t: String(Date.now()),
+            });
+            const url = `/api/download_template?${params}`;
             try {
                 showLoading("Preparing Excel template...");
                 const resp = await fetch(url);
                 if (!resp.ok) throw new Error("Server returned status " + resp.status);
-                const blob = await resp.blob();
-                const blobUrl = URL.createObjectURL(blob);
-                const link = document.createElement("a");
-                link.href = blobUrl;
-                link.download = includesImports ? "sku_upload_template_import.xlsx" : "sku_upload_template_domestic.xlsx";
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(blobUrl);
-                toast("Template downloaded successfully!", "success");
-            } catch (err) {
-                toast("Failed to download template: " + err.message, "error");
-            } finally {
-                hideLoading();
-            }
-        });
-    }
-
-    // Step 1's "retrieve strategy if available" — shares last year's recorded
-    // snapshot (units/cube/DC breakdown) from the enterprise historical
-    // allocation table. This is display-only: acting on it (pre-filtering or
-    // greying Step 2's DC options) is a separate, not-yet-built step.
-    const fmtCube = v => v != null ? Number(v).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2}) : "—";
-
-    async function setupPriorYearStrategy() {
-        const select = $("#step1EventNameSelect");
-        const customInput = $("#step1EventNameCustom");
-        const yearInput = $("#step1EventYear");
-
-        // Default to the current calendar year — the user can still override
-        // (e.g. a forward-looking event like Patio planned a year ahead).
-        if (yearInput && !yearInput.value) yearInput.value = new Date().getFullYear();
-
-        // Dropdown of event names already in history (data governance — avoids
-        // near-duplicate free-text variants like "Gift Center" vs "GIFT CTR"),
-        // with an explicit "Other" escape hatch for a genuinely new event.
-        if (select) {
-            try {
-                const res = await api("/api/known_event_names");
-                const names = res.event_names || [];
-                select.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join("")
-                    + `<option value="__other__">Other (new event)…</option>`;
-            } catch (e) {
-                select.innerHTML = `<option value="__other__">Other (new event)…</option>`;
-            }
-            select.addEventListener("change", () => {
-                const isOther = select.value === "__other__";
-                if (customInput) {
-                    customInput.style.display = isOther ? "block" : "none";
-                    if (isOther) customInput.focus();
+                const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
+                const strategyLabel = isVendorAligned ? "Vendor-Aligned Strategy" : (o.strategy_type || "Strategy Not Recorded");
+                const countLabel = isVendorAligned ? "Suppliers" : "Assortments";
+                const countValue = result.strategy_summary?.length || 0;
+                let html = `<div class="prior-strategy-card">
+                    <div class="prior-strategy-heading">
+                        <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}</span>
+                            <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
+                        <span class="prior-strategy-type">${o.strategy_type || "Not recorded"}</span>
+                    </div>
+                    <div class="prior-strategy-metrics">
+                        <div><span>${countLabel}</span><strong>${fmtNum(countValue)}</strong></div>
+                        <div><span>Total Units</span><strong>${fmtNum(o.total_units)}</strong></div>
+                        <div><span>Total Cube (ft&sup3;)</span><strong>${fmtCube(o.total_cube)}</strong></div>
+                        <div><span>Total THD Keys</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
+                        <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
+                    </div>`;
+                if (result.strategy_summary?.length) {
+                    html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
+                    for (const s of result.strategy_summary) {
+                        const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
+                        html += `<div class="prior-strategy-detail-row"><strong>${label}</strong><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><small>${s.dc_list || "—"}</small></div>`;
+                    }
+                    html += `</div>`;
                 }
-            });
-        }
-
-        function currentEventName() {
-            if (select?.value === "__other__") {
-                // Uppercased for the same governance reason the dropdown exists —
-                // keeps a newly-typed name consistent with the canonical
-                // convention instead of introducing a stray-cased variant.
-                return (customInput?.value || "").trim().toUpperCase();
-            }
-            return select?.value || "";
-        }
-
-        $("#btnCheckPriorStrategy")?.addEventListener("click", async () => {
-            const name = currentEventName();
-            const year = yearInput?.value?.trim();
-            const section = $("#priorStrategySection");
-            if (!section) return;
+                html += `</div>`;
             if (!name || !year) {
                 toast("Enter an event name and year first", "error");
                 return;
@@ -322,7 +294,7 @@
                 }
                 const o = result.overall;
                 let html = `<h4 style="margin:0 0 10px 0;font-size:.95rem">
-                    <i class="fas fa-clock-rotate-left"></i> ${result.event_name} ${result.event_year} — Last Recorded Strategy</h4>`;
+                    <i class="fas fa-clock-rotate-left"></i> ${result.event_name} ${result.event_year} — Last Recorded Strategy${o.strategy_type ? ` (${o.strategy_type})` : ""}</h4>`;
                 html += `<table class="detail-table" style="margin-bottom:10px">
                     <tr style="background:var(--hd-bg);font-weight:600">
                         <td>Units</td><td>Cube (ft&sup3;)</td><td>Total SKUs</td><td>DC Count</td></tr>
@@ -330,6 +302,18 @@
                         <td>${fmtNum(o.total_units)}</td><td>${fmtCube(o.total_cube)}</td>
                         <td>${fmtNum(o.distinct_thd_keys)}</td><td>${o.normalized_dc_count ?? "—"}</td></tr>
                     </table>`;
+                if (result.strategy_summary && result.strategy_summary.length) {
+                    const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
+                    html += `<h4 style="margin:14px 0 6px 0;font-size:.9rem">${isVendorAligned ? "Vendor DC Strategy" : "Assortment DC Strategy"}</h4>`;
+                    html += `<table class="detail-table" style="margin-bottom:10px"><thead><tr>
+                        <td>${isVendorAligned ? "Vendor" : "ASMT_ID"}</td>
+                        <td style="text-align:right">DC Count</td><td>DC Nbrs</td></tr></thead><tbody>`;
+                    for (const s of result.strategy_summary) {
+                        html += `<tr><td>${isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—")}</td>
+                            <td style="text-align:right">${s.dc_count ?? "—"}</td><td>${s.dc_list || "—"}</td></tr>`;
+                    }
+                    html += `</tbody></table>`;
+                }
                 // Tier strategy: one row per (DC-count tier, individual DC),
                 // matching the exact layout requested — Strategy | DC Tier |
                 // Campus Pairs Y/N | DC Nbr | DC Name | Units | Cube. Empty for
@@ -348,7 +332,7 @@
                         const newTier = t.dc_count !== lastTier;
                         lastTier = t.dc_count;
                         html += `<tr${newTier ? ' style="border-top:2px solid #ddd"' : ""}>
-                            <td>${t.strategy}</td>
+                            <td>${t.strategy || "—"}</td>
                             <td style="text-align:right">${t.dc_count}${t.has_variants
                                 ? ' <span title="Some factories at this tier used a different DC combination — totals reflect only the most common one" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
                                 : ""}</td>
@@ -452,6 +436,7 @@
         try {
             const result = await api("/api/upload", { method: "POST", body: formData });
             displayValidation(result);
+            if (result.passed && !result.import_mismatch) await doInsert(false);
         } catch (e) {
             toast("Upload failed: " + e.message, "error");
         } finally {
@@ -729,11 +714,13 @@
                 body: JSON.stringify({ container_divisor: getContainerDivisor(), overwrite }),
             });
             if (result.success) {
-                $("#insertStatus").style.display = "block";
-                $("#insertStatus").innerHTML = `
+                const statusHtml = `
                     <div class="validation-badge badge-pass">
                         <i class="fas fa-check-circle"></i> ${result.message}
                     </div>`;
+                [$("#insertStatus"), $("#autoInsertStatus")].forEach(status => {
+                    if (status) { status.style.display = "block"; status.innerHTML = statusHtml; }
+                });
                 $("#btnGoStrategy").disabled = false;
                 $("#btnInsert").disabled = true;
                 const replaceBtn = $("#btnReplaceInsert");
@@ -741,11 +728,19 @@
                 toast("Data inserted successfully!", "success");
             } else if (result.exists) {
                 // Event already exists — show replace option
-                $("#insertStatus").style.display = "block";
-                $("#insertStatus").innerHTML = `
+                const statusHtml = `
                     <div class="validation-badge badge-warn" style="background:#fff3cd;color:#856404;border:1px solid #ffc107">
                         <i class="fas fa-exclamation-triangle"></i> ${result.message}
+                        <button class="btn btn-secondary auto-replace-insert" style="margin-left:10px;background:#856404;color:#fff;border-color:#856404">
+                            <i class="fas fa-rotate"></i> Replace Existing Data
+                        </button>
                     </div>`;
+                [$("#insertStatus"), $("#autoInsertStatus")].forEach(status => {
+                    if (status) { status.style.display = "block"; status.innerHTML = statusHtml; }
+                });
+                document.querySelectorAll(".auto-replace-insert").forEach(button => {
+                    button.addEventListener("click", () => doInsert(true));
+                });
                 $("#btnInsert").disabled = true;
                 const replaceBtn = $("#btnReplaceInsert");
                 if (replaceBtn) replaceBtn.style.display = "inline-flex";
@@ -754,11 +749,13 @@
                 throw new Error(result.error || "Insert failed");
             }
         } catch (e) {
-            $("#insertStatus").style.display = "block";
-            $("#insertStatus").innerHTML = `
+            const statusHtml = `
                 <div class="validation-badge badge-fail">
                     <i class="fas fa-times-circle"></i> ${e.message}
                 </div>`;
+            [$("#insertStatus"), $("#autoInsertStatus")].forEach(status => {
+                if (status) { status.style.display = "block"; status.innerHTML = statusHtml; }
+            });
             toast("Insert failed: " + e.message, "error");
         } finally {
             hideLoading();
@@ -1278,13 +1275,6 @@
             if (result.error) throw new Error(result.error);
 
             vendorMatches = result.matches || [];
-            const tbody = $("#vendorMatchBody");
-            tbody.innerHTML = "";
-            for (const m of vendorMatches) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `<td>${m.SUPPLIER}</td><td>${m.VENDOR}</td><td>${m.ASMT_ID}</td><td>${m.DC_COUNT}</td><td>${m.DC_NM_LIST || m.DC_LIST || "—"}</td>`;
-                tbody.appendChild(tr);
-            }
 
             const summary = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-info-circle"></i> 
@@ -1306,6 +1296,118 @@
         }
     }
 
+    function parseVendorDcs(value) {
+        const values = Array.isArray(value) ? value : String(value || "").match(/\d+/g) || [];
+        return [...new Set(values.map(Number).filter(Number.isFinite))];
+    }
+
+    function parseVendorNames(value) {
+        if (Array.isArray(value)) return value.map(String);
+        return String(value || "").replace(/^\[|\]$/g, "").split(/[,|]/).map(value => value.replace(/^['\"]|['\"]$/g, "").trim()).filter(Boolean);
+    }
+
+    function vendorDcName(dcNbr, names, index) {
+        if (names[index]) return names[index];
+        const known = ALL_DCS.find(dc => dc.nbr === dcNbr);
+        return known ? known.name : `DC ${dcNbr}`;
+    }
+
+    function toggleVendorDc(matchIndex, dcNbr) {
+        const match = vendorMatches[matchIndex];
+        const selected = parseVendorDcs(match?.DC_LIST);
+        if (!match || (selected.length === 1 && selected[0] === dcNbr)) {
+            toast("Each supplier must have at least one DC selected", "error");
+            return;
+        }
+        const next = selected.includes(dcNbr)
+            ? selected.filter(dc => dc !== dcNbr)
+            : [...selected, dcNbr];
+        next.sort((a, b) => a - b);
+        match.DC_LIST = next.join(", ");
+        match.DC_COUNT = next.length;
+        const initialDcs = parseVendorDcs(match._initialDcList);
+        const initialNames = parseVendorNames(match._initialDcNames);
+        match.DC_NM_LIST = next.map(dc => vendorDcName(dc, initialNames, initialDcs.indexOf(dc))).join(", ");
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
+    let vendorSkuExpanded = new Set();
+
+    function vendorSkuDcs(match, row) {
+        const overrides = match.SKU_OVERRIDES || {};
+        return parseVendorDcs(overrides[row.THD_KEY] || match.DC_LIST);
+    }
+
+    async function toggleVendorSkuRows(matchIndex) {
+        if (vendorSkuExpanded.has(matchIndex)) {
+            vendorSkuExpanded.delete(matchIndex);
+        } else {
+            vendorSkuExpanded.add(matchIndex);
+        }
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
+    async function loadVendorSkuRows(matchIndex, page) {
+        const match = vendorMatches[matchIndex];
+        const container = $(`#vendor-skus-${matchIndex}`);
+        if (!match || !container) return;
+        container.innerHTML = '<div class="vendor-sku-loading">Loading SKU details...</div>';
+        try {
+            const result = await api(`/api/vendor_skus?supplier=${encodeURIComponent(match.SUPPLIER)}&page=${page}&page_size=50`);
+            if (result.error) throw new Error(result.error);
+            match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
+            const defaultDcs = parseVendorDcs(match.DC_LIST);
+            let html = `<table class="detail-table vendor-sku-table"><thead><tr>
+                <th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
+            result.rows.forEach(row => {
+                const selectedDcs = vendorSkuDcs(match, row);
+                html += `<tr><td>${(match.VENDOR || match.SUPPLIER || "").toUpperCase()}</td><td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td>
+                    <td class="vendor-sku-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
+                defaultDcs.forEach((dcNbr, dcIndex) => {
+                    const name = vendorDcName(dcNbr, parseVendorNames(match._initialDcNames), dcIndex);
+                    html += `<button type="button" class="dc-toggle-btn vendor-dc-btn vendor-sku-dc-btn${selectedDcs.includes(dcNbr) ? " active" : ""}"
+                        title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-sku-key="${row.THD_KEY}" data-dc-nbr="${dcNbr}">${dcNbr}</button>`;
+                });
+                html += `</div>${match.SKU_OVERRIDES[row.THD_KEY] ? '<span class="vendor-sku-override">Override</span>' : ""}</td></tr>`;
+            });
+            html += `</tbody></table><div class="vendor-sku-footer"><button type="button" class="btn btn-sm btn-secondary vendor-sku-hide"><i class="fas fa-chevron-up"></i> Hide SKUs</button> Page ${result.page} of ${result.pages || 1} · ${result.total} SKU(s)`;
+            if (result.pages > 1) {
+                html += `<button type="button" class="btn btn-sm btn-secondary vendor-sku-next" data-match-index="${matchIndex}" data-page="${result.page + 1}" ${result.page >= result.pages ? "disabled" : ""}>Next</button>`;
+            }
+            html += `</div>`;
+            container.innerHTML = html;
+            container.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
+                button.addEventListener("click", () => toggleVendorSkuDc(
+                    Number(button.dataset.matchIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
+                ));
+            });
+            container.querySelector(".vendor-sku-next")?.addEventListener("click", event => {
+                loadVendorSkuRows(matchIndex, Number(event.currentTarget.dataset.page));
+            });
+            container.querySelector(".vendor-sku-hide")?.addEventListener("click", () => toggleVendorSkuRows(matchIndex));
+        } catch (error) {
+            container.innerHTML = `<div class="vendor-sku-loading">Unable to load SKU details: ${error.message}</div>`;
+        }
+    }
+
+    function toggleVendorSkuDc(matchIndex, skuKey, dcNbr) {
+        const match = vendorMatches[matchIndex];
+        if (!match) return;
+        match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
+        const selected = parseVendorDcs(match.SKU_OVERRIDES[skuKey] || match.DC_LIST);
+        if (selected.length === 1 && selected[0] === dcNbr) {
+            toast("Each SKU must have at least one DC selected", "error");
+            return;
+        }
+        const next = selected.includes(dcNbr) ? selected.filter(dc => dc !== dcNbr) : [...selected, dcNbr];
+        next.sort((a, b) => a - b);
+        const defaults = parseVendorDcs(match.DC_LIST);
+        if (next.join(",") === defaults.join(",")) delete match.SKU_OVERRIDES[skuKey];
+        else match.SKU_OVERRIDES[skuKey] = next;
+        const page = Number($(`#vendor-skus-${matchIndex} .vendor-sku-next`)?.dataset.page || 1) - 1 || 1;
+        loadVendorSkuRows(matchIndex, page);
+    }
+
     // Per-supplier rollup of the vendor-strategy match: SKU count comes from
     // the uploaded template, DC count/list from the matched VENDOR_ALIGNED_STRATEGY
     // row. Suppliers falling back to the "OTHER" vendor are flagged, since their
@@ -1318,25 +1420,48 @@
             return;
         }
         let html = `<h4 style="margin:0 0 6px 0;font-size:.9rem">
-            <i class="fas fa-boxes-stacked"></i> Supplier Summary</h4>`;
-        html += `<div class="table-container" style="max-height:300px;overflow-y:auto">
-            <table class="detail-table"><thead><tr>
-                <th>Supplier</th><th style="text-align:right">SKU Count</th>
-                <th style="text-align:right">DC Count</th><th>DC List</th>
-            </tr></thead><tbody>`;
-        for (const m of matches) {
+            <i class="fas fa-boxes-stacked"></i> Supplier DC Assignments</h4>
+            <p class="vendor-dc-help">Select the DC buttons for each supplier. Hover over a DC number to see its name.</p>
+            <div class="table-container vendor-dc-table-wrap"><table class="detail-table vendor-dc-table">
+            <thead><tr><th>Matched THD Key</th><th>Supplier</th><th>DC Count</th><th>DC Details</th></tr></thead><tbody>`;
+        matches.forEach((m, matchIndex) => {
             const isOther = (m.VENDOR || "").toUpperCase() === "OTHER";
-            html += `<tr><td>${m.SUPPLIER}${isOther
+            if (!m._initialDcList) m._initialDcList = parseVendorDcs(m.DC_LIST).join(", ");
+            if (!m._initialDcNames) m._initialDcNames = Array.isArray(m.DC_NM_LIST) ? m.DC_NM_LIST.join(", ") : (m.DC_NM_LIST || "");
+            const selectedDcs = parseVendorDcs(m.DC_LIST);
+            const initialDcs = parseVendorDcs(m._initialDcList);
+            const names = parseVendorNames(m._initialDcNames);
+            if (vendorSkuExpanded.has(matchIndex)) {
+                html += `<tr class="vendor-sku-detail-row"><td colspan="4"><div id="vendor-skus-${matchIndex}" class="vendor-sku-details"></div></td></tr>`;
+                return;
+            }
+            const matchedVendor = (m.VENDOR || m.SUPPLIER || "").toUpperCase();
+            html += `<tr><td style="text-align:right"><div>${fmtNum(m.SKU_COUNT)}</div>
+                <button type="button" class="btn btn-sm btn-secondary vendor-sku-toggle" data-match-index="${matchIndex}">
+                    <i class="fas fa-chevron-${vendorSkuExpanded.has(matchIndex) ? "up" : "down"}"></i> ${vendorSkuExpanded.has(matchIndex) ? "Hide" : "View"} SKUs
+                </button></td>
+                <td><strong>${matchedVendor}${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
-                    : ""}</td>
-                <td style="text-align:right">${fmtNum(m.SKU_COUNT)}</td>
-                <td style="text-align:right">${m.DC_COUNT}</td>
-                <td>${m.DC_LIST || "—"}</td></tr>`;
-        }
-        html += `</tbody><tfoot><tr style="font-weight:600;background:var(--hd-bg)">
-            <td>Total</td><td style="text-align:right">${fmtNum(totalSkus)}</td>
-            <td colspan="2"></td></tr></tfoot></table></div>`;
+                    : ""}</strong></td>
+                <td class="vendor-dc-count">${selectedDcs.length}</td><td><div class="vendor-dc-buttons">`;
+            initialDcs.forEach((dcNbr, dcIndex) => {
+                const name = vendorDcName(dcNbr, names, dcIndex);
+                html += `<button type="button" class="dc-toggle-btn vendor-dc-btn${selectedDcs.includes(dcNbr) ? " active" : ""}"
+                    title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-dc-nbr="${dcNbr}">${dcNbr}</button>`;
+            });
+            html += `</div></td></tr>`;
+        });
+        html += `</tbody><tfoot><tr><td colspan="4" class="vendor-dc-total">Total matched THD Keys: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))}</td></tr></tfoot></table></div>`;
         box.innerHTML = html;
+        box.querySelectorAll(".vendor-dc-btn").forEach(button => {
+            button.addEventListener("click", () => toggleVendorDc(
+                Number(button.dataset.matchIndex), Number(button.dataset.dcNbr)
+            ));
+        });
+        box.querySelectorAll(".vendor-sku-toggle").forEach(button => {
+            button.addEventListener("click", () => toggleVendorSkuRows(Number(button.dataset.matchIndex)));
+        });
+        vendorSkuExpanded.forEach(matchIndex => loadVendorSkuRows(matchIndex, 1));
     }
 
     let availableDcOptions = [];
@@ -1941,6 +2066,7 @@
 
         if (selectedStrategy === "VENDOR_ALIGNED") {
             body.sku_grp = $("#stratSkuGrp")?.value?.trim() || "";
+            body.vendor_matches = vendorMatches;
         } else if (selectedStrategy === "DC_SELECTION" || selectedStrategy === "SINGLE_DC" || selectedStrategy === "MULTI_DC") {
             const dynamicMode = multiDcDynamicSelected && includesImports;
             if (dynamicMode) {

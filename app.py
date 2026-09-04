@@ -115,7 +115,7 @@ def api_config():
 
 # ── Section 1: Template Download ────────────────────────────────────
 
-def _build_template(columns, filename):
+def _build_template(columns, filename, event_name="", event_year=""):
     wb = Workbook()
     ws = wb.active
     ws.title = "SKU Upload Template"
@@ -149,6 +149,11 @@ def _build_template(columns, filename):
         if col["required"] or col.get("note"):
             cell.fill = req_fill
 
+    if event_name:
+        ws.cell(row=2, column=1, value=event_name)
+    if event_year and len(columns) > 1 and columns[1]["name"] == "EVENT_YEAR":
+        ws.cell(row=2, column=2, value=int(event_year) if str(event_year).isdigit() else event_year)
+
     ws.freeze_panes = "A3"
 
     buf = io.BytesIO()
@@ -165,9 +170,11 @@ def _build_template(columns, filename):
 @app.route("/api/download_template")
 def download_template():
     includes_imports = request.args.get("imports", "false").lower() == "true"
+    event_name = request.args.get("event_name", "").strip()
+    event_year = request.args.get("event_year", "").strip()
     if includes_imports:
-        return _build_template(TEMPLATE_COLUMNS_IMPORT, "sku_upload_template_import.xlsx")
-    return _build_template(TEMPLATE_COLUMNS_DOMESTIC, "sku_upload_template_domestic.xlsx")
+        return _build_template(TEMPLATE_COLUMNS_IMPORT, "sku_upload_template_import.xlsx", event_name, event_year)
+    return _build_template(TEMPLATE_COLUMNS_DOMESTIC, "sku_upload_template_domestic.xlsx", event_name, event_year)
 
 
 @app.route("/api/upload_status")
@@ -907,7 +914,9 @@ def insert_to_bq():
         job.result()
         rows_inserted = job.num_dml_affected_rows or row_count
 
-        _upload_cache.clear()
+        # Keep the validated frame available for vendor matching and SKU-level
+        # DC overrides after the event has been inserted.
+        _upload_cache.pop("validation_table", None)
         return jsonify({
             "success": True,
             "message": f"Inserted {rows_inserted} enriched rows into EVENTS_SKU_LIST.",
@@ -1023,6 +1032,83 @@ def api_match_vendor_strategy():
 
 
 # ── Section 4b: DFC Cost Model Submission ────────────────────────────
+
+@app.route("/api/vendor_skus")
+def api_vendor_skus():
+    """Return one supplier's validated SKU rows for the expandable drill-down."""
+    df = _upload_cache.get("df")
+    supplier = request.args.get("supplier", "").strip()
+    if df is None or not supplier:
+        return jsonify({"error": "A validated upload and supplier are required."}), 400
+    if "SUPPLIER" not in df.columns:
+        return jsonify({"error": "The validated upload has no SUPPLIER column."}), 400
+
+    try:
+        page = max(int(request.args.get("page", 1)), 1)
+        page_size = min(max(int(request.args.get("page_size", 50)), 1), 100)
+    except ValueError:
+        return jsonify({"error": "page and page_size must be numbers."}), 400
+
+    supplier_mask = df["SUPPLIER"].fillna("").astype(str).str.strip().str.upper() == supplier.upper()
+    rows_df = df.loc[supplier_mask].copy()
+    key_cols = [c for c in _determine_thd_key(df, _upload_cache.get("includes_imports", False)) if c in df.columns]
+    rows_df["THD_KEY"] = rows_df[key_cols].fillna("__NULL__").astype(str).agg("|".join, axis=1)
+    total = len(rows_df)
+    start = (page - 1) * page_size
+
+    def numeric_value(value, default=0):
+        try:
+            return float(str(value).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return default
+
+    item_cubes = {}
+    sku_values = [int(numeric_value(value)) for value in rows_df["THD_SKU_NBR"].dropna().tolist()]
+    if sku_values:
+        cube_query = f"""
+            SELECT THD_SKU_NBR AS SKU_NBR, MAX(ITEM_CUBE) AS ITEM_CUBE
+            FROM {EVENTS_SKU_LIST}
+            WHERE UPPER(EVENT_NAME) = @event_name
+              AND EVENT_YEAR = @event_year
+              AND THD_SKU_NBR IN UNNEST(@sku_list)
+            GROUP BY THD_SKU_NBR
+        """
+        cube_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("event_name", "STRING", _upload_cache.get("event_name", "").upper()),
+            bigquery.ScalarQueryParameter("event_year", "INT64", int(_upload_cache.get("event_year", 2026))),
+            bigquery.ArrayQueryParameter("sku_list", "INT64", sorted(set(sku_values))),
+        ])
+        for cube_row in bq().query(cube_query, job_config=cube_config).result():
+            item_cubes[int(cube_row.SKU_NBR)] = float(cube_row.ITEM_CUBE or 0)
+
+        missing_cubes = sorted(set(sku_values) - set(item_cubes))
+        if missing_cubes:
+            fallback_query = f"""
+                SELECT SKU_NBR, ROUND(ECH_DPTH * ECH_WDTH * ECH_HGHT, 2) AS ITEM_CUBE
+                FROM {SCHN_SKU_ATTR}
+                WHERE SKU_NBR IN UNNEST(@sku_list) AND LATEST_SKU_CRT_DT_FLG IS TRUE
+            """
+            fallback_config = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("sku_list", "INT64", missing_cubes),
+            ])
+            for cube_row in bq().query(fallback_query, job_config=fallback_config).result():
+                item_cubes[int(cube_row.SKU_NBR)] = float(cube_row.ITEM_CUBE or 0)
+
+    rows = []
+    for _, row in rows_df.iloc[start:start + page_size].iterrows():
+        item = {}
+        for col in ["THD_KEY", "THD_SKU_NBR", "SISTER_SKU_NBR", "SKU_DESC", "BP", "BUY_UNITS", "WAVE_1", "WAVE_2", "WAVE_3", "WAVE_4", "WAVE_5"]:
+            if col not in row.index:
+                continue
+            value = row[col]
+            item[col] = "" if pd.isna(value) else str(value)
+        sku_nbr = int(numeric_value(row["THD_SKU_NBR"])) if pd.notna(row.get("THD_SKU_NBR")) else None
+        buy_units = numeric_value(row.get("BUY_UNITS")) if pd.notna(row.get("BUY_UNITS")) else 0
+        item["TOTAL_UNITS"] = str(int(buy_units)) if buy_units else ""
+        item["TOTAL_CUBE"] = f"{item_cubes.get(sku_nbr, 0) * buy_units:.2f}" if sku_nbr else ""
+        rows.append(item)
+    return jsonify({"rows": rows, "page": page, "page_size": page_size, "total": total, "pages": (total + page_size - 1) // page_size})
+
 
 @app.route("/api/cost_model_preview", methods=["POST"])
 def api_cost_model_preview():

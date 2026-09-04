@@ -44,10 +44,6 @@
     <section class="wizard-panel active" id="panel-1">
         <div class="card">
             <h3><i class="fas fa-cog"></i> Step 1: Event Configuration & Template Download</h3>
-            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
-                Does your SKU list contain imports? This determines which template and validations apply.
-            </p>
-
             <!-- Event name/year + prior-year strategy lookup -->
             <div style="margin-bottom:20px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
                 <div>
@@ -64,40 +60,39 @@
                     <input type="number" id="step1EventYear" placeholder="e.g. 2027"
                         style="display:block;width:120px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
                 </div>
+                <div style="min-width:220px">
+                    <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Event Type</label>
+                    <div class="import-toggle" style="display:flex;gap:6px;margin-top:4px">
+                        <label class="strategy-option" style="display:inline-block;flex:1">
+                            <input type="radio" name="importToggle" value="false" checked />
+                            <div class="strategy-card" style="padding:6px 10px;text-align:center;height:100%;display:flex;align-items:center;justify-content:center">
+                                <strong><i class="fas fa-home"></i> Domestic</strong>
+                            </div>
+                        </label>
+                        <label class="strategy-option" style="display:inline-block;flex:1">
+                            <input type="radio" name="importToggle" value="true" />
+                            <div class="strategy-card" style="padding:6px 10px;text-align:center;height:100%;display:flex;align-items:center;justify-content:center">
+                                <strong><i class="fas fa-ship"></i> Import</strong>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+                <div id="containerSizeStep1" style="display:none;min-width:220px">
+                    <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Container Size (ft³)</label>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                        <select id="containerSizeSelect" style="padding:6px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
+                            <option value="2390" selected>2390 (40ft standard)</option>
+                            <option value="3000">3000 (40ft high-cube)</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                        <input id="containerSizeCustom" type="number" min="1" placeholder="cuft" style="display:none;width:80px;padding:6px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
+                    </div>
+                </div>
                 <button class="btn btn-secondary" id="btnCheckPriorStrategy">
-                    <i class="fas fa-clock-rotate-left"></i> Check Last Year's Strategy
+                    <i class="fas fa-clock-rotate-left"></i> View Last Year's Strategy
                 </button>
             </div>
             <div id="priorStrategySection" style="display:none;margin-bottom:20px;padding:14px 16px;background:#f5f5f5;border-radius:6px"></div>
-
-            <div class="import-toggle" style="margin-bottom:20px;display:flex;gap:16px">
-                <label class="strategy-option" style="display:inline-block;flex:1">
-                    <input type="radio" name="importToggle" value="false" checked />
-                    <div class="strategy-card" style="padding:10px 18px;text-align:center;height:100%;display:flex;align-items:center;justify-content:center">
-                        <strong><i class="fas fa-home"></i> Domestic Only</strong>
-                    </div>
-                </label>
-                <label class="strategy-option" style="display:inline-block;flex:1">
-                    <input type="radio" name="importToggle" value="true" />
-                    <div class="strategy-card" style="padding:10px 18px;text-align:center;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center">
-                        <strong><i class="fas fa-ship"></i> Import Only</strong>
-                        <span>*requires Factory ID</span>
-                    </div>
-                </label>
-            </div>
-
-            <!-- Container size (imports only) -->
-            <div id="containerSizeStep1" style="display:none;margin-bottom:20px;padding:12px 16px;background:#f5f5f5;border-radius:6px">
-                <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Container Size (cuft):</label>
-                <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
-                    <select id="containerSizeSelect" style="padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
-                        <option value="2390" selected>2390 (40ft standard)</option>
-                        <option value="3000">3000 (40ft high-cube)</option>
-                        <option value="custom">Custom</option>
-                    </select>
-                    <input id="containerSizeCustom" type="number" min="1" placeholder="cuft" style="display:none;width:80px;padding:4px 8px;border-radius:4px;border:1px solid #ccc;font-size:.82rem">
-                </div>
-            </div>
 
             <!-- Template Download Section -->
             <div style="margin-top:20px;padding:16px;background:#eef6ff;border:1px solid #b6d4fe;border-radius:8px">
@@ -109,7 +104,7 @@
                         <span id="templateDescText" style="font-size:.82rem;color:var(--hd-medium-gray)"></span>
                     </div>
                     <button class="btn btn-primary" id="btnDownloadTemplate" style="background:#107c41;border-color:#107c41">
-                        <i class="fas fa-download"></i> Download Template
+                        <i class="fas fa-download"></i> Download
                     </button>
                 </div>
             </div>
@@ -129,8 +124,8 @@
             <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
                 Download the Excel template pre-configured for your selection, fill it out, then proceed to upload.
             </p>
-            <button class="btn btn-primary" id="btnDownloadTemplate">
-                <i class="fas fa-download"></i> Download Excel Template
+            <button class="btn btn-primary" id="btnDownloadTemplateLegacy">
+                <i class="fas fa-download"></i> Download
             </button>
         </div>
         <div class="wizard-nav">
@@ -159,18 +154,17 @@
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- SECTION 5: INSERT TO BIGQUERY -->
+    <!-- SECTION 5: DATA STATUS -->
     <!-- ═══════════════════════════════════════════════════════════ -->
     <section class="wizard-panel" id="panel-5">
         <div class="card">
-            <h3><i class="fas fa-database"></i> Step 5: Insert to BigQuery</h3>
+            <h3><i class="fas fa-database"></i> Step 5: Data Status</h3>
             <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
-                Confirm this is the SKU list you would like to use. Once inserted,
-                the data will be written to <code>CM_STAGE.EVENTS_SKU_LIST</code>
-                with computed columns (SKU_BUY_CUBE, SKU_LEVEL_CONTAINERS, timestamps).
+                Valid files are automatically written to <code>CM_STAGE.EVENTS_SKU_LIST</code>
+                with computed columns before you continue to the assortment workflow.
             </p>
             <div id="insertStatus" style="display:none;margin-bottom:12px"></div>
-            <button class="btn btn-success" id="btnInsert">
+            <button class="btn btn-success" id="btnInsert" style="display:none">
                 <i class="fas fa-cloud-arrow-up"></i> Insert to BigQuery
             </button>
             <button class="btn btn-secondary" id="btnReplaceInsert" style="display:none;margin-left:8px;background:#856404;color:#fff;border-color:#856404">
@@ -312,12 +306,6 @@
                     </div>
                     <div id="vendorMatchResult" style="display:none;margin-top:12px">
                         <div id="vendorMatchSummary" style="margin-bottom:10px"></div>
-                        <div class="table-container" style="max-height:300px;overflow-y:auto">
-                            <table class="detail-table" id="vendorMatchTable">
-                                <thead><tr><th>Supplier</th><th>Matched Vendor</th><th>ASMT_ID</th><th>DC Count</th><th>DCs</th></tr></thead>
-                                <tbody id="vendorMatchBody"></tbody>
-                            </table>
-                        </div>
                         <div id="vendorSupplierSummary" style="margin-top:14px"></div>
                         <div id="vendorConfirmBox" style="margin-top:12px">
                             <button class="btn btn-primary" id="btnConfirmVendorStrategy">
@@ -471,6 +459,7 @@
 
                 <!-- Success Summary -->
                 <div id="successSection" style="display:none;margin-top:12px">
+                    <div id="autoInsertStatus" style="display:none;margin-bottom:12px"></div>
                     <div id="thdKeyInfo" style="display:none;margin-bottom:10px;padding:8px 12px;background:#f5f5f5;border-radius:6px;font-size:.82rem">
                         <strong>THD_KEY:</strong> <span id="thdKeyLabel"></span>
                     </div>
