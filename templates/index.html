@@ -31,10 +31,9 @@
         <div class="stepper">
             <div class="step active" data-step="1"><span class="step-num">1</span><span class="step-label">Config & Template</span></div>
             <div class="step" data-step="2"><span class="step-num">2</span><span class="step-label">Strategy & Upload</span></div>
-            <div class="step" data-step="5"><span class="step-num">3</span><span class="step-label">Insert</span></div>
-            <div class="step" data-step="6"><span class="step-num">4</span><span class="step-label">Asmt Tool</span></div>
-            <div class="step" data-step="7"><span class="step-num">5</span><span class="step-label">Assortment</span></div>
-            <div class="step" data-step="8"><span class="step-num">6</span><span class="step-label">Allocation</span></div>
+            <div class="step" data-step="6"><span class="step-num">3</span><span class="step-label">Asmt Tool</span></div>
+            <div class="step" data-step="7"><span class="step-num">4</span><span class="step-label">Assortment</span></div>
+            <div class="step" data-step="8"><span class="step-num">5</span><span class="step-label">Allocation</span></div>
         </div>
     </nav>
 
@@ -116,68 +115,6 @@
     </section>
 
     <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- SECTION 3: TEMPLATE DOWNLOAD -->
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <section class="wizard-panel" id="panel-3">
-        <div class="card">
-            <h3><i class="fas fa-file-excel"></i> Step 3: Download Template</h3>
-            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
-                Download the Excel template pre-configured for your selection, fill it out, then proceed to upload.
-            </p>
-            <button class="btn btn-primary" id="btnDownloadTemplateLegacy">
-                <i class="fas fa-download"></i> Download
-            </button>
-        </div>
-        <div class="wizard-nav">
-            <button class="btn btn-secondary" onclick="goStep(2)"><i class="fas fa-arrow-left"></i> Back</button>
-            <button class="btn btn-primary" onclick="goStep(4)">Next <i class="fas fa-arrow-right"></i></button>
-        </div>
-    </section>
-
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- SECTION 4: FILE UPLOAD & VALIDATION (REDIRECT) -->
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <section class="wizard-panel" id="panel-4">
-        <div class="card">
-            <h3><i class="fas fa-cloud-arrow-up"></i> Step 4: Upload & Validate</h3>
-            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
-                File upload and validation has been moved directly into <strong>Step 2 (Strategy & Upload)</strong>.
-            </p>
-            <button class="btn btn-primary" onclick="goStep(2)">
-                <i class="fas fa-arrow-left"></i> Go to Step 2 (Strategy & Upload)
-            </button>
-        </div>
-        <div class="wizard-nav">
-            <button class="btn btn-secondary" onclick="goStep(3)"><i class="fas fa-arrow-left"></i> Back</button>
-            <button class="btn btn-primary" onclick="goStep(5)">Next <i class="fas fa-arrow-right"></i></button>
-        </div>
-    </section>
-
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <!-- SECTION 5: DATA STATUS -->
-    <!-- ═══════════════════════════════════════════════════════════ -->
-    <section class="wizard-panel" id="panel-5">
-        <div class="card">
-            <h3><i class="fas fa-database"></i> Step 5: Data Status</h3>
-            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
-                Valid files are automatically written to <code>CM_STAGE.EVENTS_SKU_LIST</code>
-                with computed columns before you continue to the assortment workflow.
-            </p>
-            <div id="insertStatus" style="display:none;margin-bottom:12px"></div>
-            <button class="btn btn-success" id="btnInsert" style="display:none">
-                <i class="fas fa-cloud-arrow-up"></i> Insert to BigQuery
-            </button>
-            <button class="btn btn-secondary" id="btnReplaceInsert" style="display:none;margin-left:8px;background:#856404;color:#fff;border-color:#856404">
-                <i class="fas fa-rotate"></i> Replace Existing Data
-            </button>
-        </div>
-        <div class="wizard-nav">
-            <button class="btn btn-secondary" onclick="goStep(4)"><i class="fas fa-arrow-left"></i> Back</button>
-            <button class="btn btn-primary" id="btnGoStrategy" disabled onclick="goStep(6)">Next <i class="fas fa-arrow-right"></i></button>
-        </div>
-    </section>
-
-    <!-- ═══════════════════════════════════════════════════════════ -->
     <!-- SECTION 6: ASSORTMENT TOOL SUBMISSION -->
     <!-- ═══════════════════════════════════════════════════════════ -->
     <section class="wizard-panel" id="panel-6">
@@ -251,7 +188,7 @@
         </div>
         <div id="lowVolumeAlert" style="display:none;margin-bottom:16px"></div>
         <div class="wizard-nav">
-            <button class="btn btn-secondary" onclick="goStep(5)"><i class="fas fa-arrow-left"></i> Back</button>
+            <button class="btn btn-secondary" onclick="goStep(2)"><i class="fas fa-arrow-left"></i> Back</button>
             <button class="btn btn-primary" id="btnDetermineAsmt">
                 <i class="fas fa-search"></i> Determine Assortment IDs <i class="fas fa-arrow-right"></i>
             </button>
@@ -262,16 +199,117 @@
     <!-- SECTION 2: STRATEGY CONFIGURATION & FILE UPLOAD -->
     <!-- ═══════════════════════════════════════════════════════════ -->
     <section class="wizard-panel" id="panel-2">
+        <!-- Card 1: Upload & Validate SKU List -->
+        <div class="card">
+            <h3><i class="fas fa-cloud-arrow-up"></i> Upload & Validate SKU List</h3>
+            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+                Upload your SKU list (.xlsx or .csv) to validate data formatting.
+            </p>
+
+            <div class="drop-zone" id="dropZone">
+                <i class="fas fa-file-arrow-up" style="font-size:2.5rem;color:var(--hd-orange);margin-bottom:8px"></i>
+                <p>Drag & drop your .xlsx or .csv file here</p>
+                <p style="font-size:.78rem;color:var(--hd-medium-gray)">or click to browse (max 10 MB)</p>
+                <input type="file" id="fileInput" accept=".xlsx,.csv" style="display:none" />
+            </div>
+            <div id="fileName" style="margin-top:8px;font-size:.85rem;color:var(--hd-medium-gray)"></div>
+
+            <!-- Validation Results -->
+            <div id="validationResults" style="display:none;margin-top:16px">
+                <h4 style="margin-bottom:8px">Validation Checks</h4>
+                <div id="checksList"></div>
+
+                <!-- Errors -->
+                <div id="errorSection" style="display:none;margin-top:12px">
+                    <h4 style="color:var(--hd-red);margin-bottom:8px"><i class="fas fa-times-circle"></i> Errors</h4>
+                    <div class="table-container" style="max-height:300px;overflow:auto">
+                        <table class="detail-table" id="errorTable" style="font-size:.72rem;white-space:nowrap">
+                            <thead><tr><th>Row</th><th>Column</th><th>Error</th><th>THD_SKU_NBR</th><th>SISTER_SKU_NBR</th><th>SKU_DESC</th><th>SUPPLIER</th><th>MVNDR_NBR</th><th>FACTORY_ID</th><th>BP</th><th>BUY_UNITS</th><th>WAVE_1</th><th>WAVE_2</th><th>WAVE_3</th><th>WAVE_4</th><th>WAVE_5</th></tr></thead>
+                            <tbody id="errorTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- FYI Warnings -->
+                <div id="warningSection" style="display:none;margin-top:12px">
+                    <h4 style="color:#b8860b;margin-bottom:8px"><i class="fas fa-info-circle"></i> FYI</h4>
+                    <div class="table-container" style="max-height:200px;overflow:auto">
+                        <table class="detail-table" id="warningTable" style="font-size:.72rem;white-space:nowrap">
+                            <thead><tr><th>Row</th><th>Column</th><th>Message</th><th>THD_SKU_NBR</th><th>SISTER_SKU_NBR</th><th>SKU_DESC</th><th>SUPPLIER</th><th>MVNDR_NBR</th><th>FACTORY_ID</th><th>BP</th><th>BUY_UNITS</th><th>WAVE_1</th><th>WAVE_2</th><th>WAVE_3</th><th>WAVE_4</th><th>WAVE_5</th></tr></thead>
+                            <tbody id="warningTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Success Summary -->
+                <div id="successSection" style="display:none;margin-top:12px">
+                    <div id="autoInsertStatus" style="display:none;margin-bottom:12px"></div>
+                    <div id="thdKeyInfo" style="display:none;margin-bottom:10px;padding:8px 12px;background:#f5f5f5;border-radius:6px;font-size:.82rem">
+                        <strong>THD_KEY:</strong> <span id="thdKeyLabel"></span>
+                    </div>
+                    <div class="kpi-cards" style="justify-content:flex-start">
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumRows">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Rows</div>
+                        </div>
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumBuyUnits">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Total Buy Units</div>
+                        </div>
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumOptimalBuy">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Optimal Buy Units</div>
+                        </div>
+                        <div class="kpi-card">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumSuppliers">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Suppliers</div>
+                        </div>
+                        <div class="kpi-card" id="sumFactoriesCard" style="display:none">
+                            <span style="font-size:1.2rem;font-weight:700" id="sumFactories">—</span>
+                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Factories</div>
+                        </div>
+                    </div>
+                    <!-- Factory distribution table (imports only) -->
+                    <div id="factoryDistribution" style="display:none;margin-top:12px">
+                        <h5 style="margin-bottom:6px;font-size:.82rem;color:var(--hd-dark-gray)">Factory Distribution</h5>
+                        <div class="table-container" style="max-height:200px;overflow-y:auto">
+                            <table class="detail-table" style="font-size:.8rem">
+                                <thead><tr><th>Factory ID</th><th style="text-align:right">SKUs<br><span style="font-weight:normal;font-size:.65rem;color:#888">distinct THD Keys</span></th><th style="text-align:right">Optimal Buy Units</th><th style="text-align:right">Containers</th></tr></thead>
+                                <tbody id="factoryDistBody"></tbody>
+                            </table>
+                        </div>
+                        <button class="btn btn-secondary" id="btnDownloadFactoryDist" style="margin-top:8px;font-size:.75rem">
+                            <i class="fas fa-download"></i> Download Factory Distribution
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Import mismatch alert -->
+                <div id="importMismatchAlert" style="display:none;margin-top:12px;padding:14px 16px;background:#fff3cd;border:1px solid #ffc107;border-radius:8px">
+                    <i class="fas fa-exclamation-triangle" style="color:#856404;margin-right:6px"></i>
+                    <strong style="color:#856404">Import file detected!</strong>
+                    <p style="margin:6px 0 0;color:#856404;font-size:.85rem">
+                        This file contains a <code>FACTORY_ID</code> column, which indicates an import file.
+                        Please go back to <strong>Step 1</strong> and select <strong>"Includes Imports"</strong> with your container size.
+                    </p>
+                    <button class="btn btn-secondary" style="margin-top:10px;font-size:.8rem" onclick="goStep(1)">
+                        <i class="fas fa-arrow-left"></i> Go to Step 1
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 2: Define Strategy & Eligible DC Network -->
         <div class="card" style="margin-bottom:20px">
             <h3><i class="fas fa-sliders"></i> Step 2: Define Strategy & Eligible DC Network</h3>
 
             <!-- Follow last year's strategy? Populated from Step 1's prior-year
                  lookup — pre-fills strategy type, DC counts, buildings, and
                  campus pairing, but leaves every control editable below. -->
-            <div id="followLastYearBox" style="display:none;margin-bottom:20px;padding:14px 16px;background:#eef6ff;border:1px solid #b6d4fe;border-radius:8px">
-                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;margin:0">
+            <div id="followLastYearBox" style="display:none;margin-bottom:16px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#000;font-size:.85rem;margin:0">
                     <input type="checkbox" id="followLastYearToggle" />
-                    <span><i class="fas fa-clock-rotate-left"></i> Follow <span id="followLastYearEventLabel">last year's</span> strategy?</span>
+                    Use last year's vendor-aligned strategy
                 </label>
                 <div id="followLastYearNote" style="display:none;margin-top:8px;font-size:0.85rem;color:#333"></div>
             </div>
@@ -299,11 +337,6 @@
 
                 <!-- VENDOR_ALIGNED fields -->
                 <div class="param-group" id="paramsVendor" style="display:none">
-                    <div class="form-row">
-                        <button class="btn btn-primary btn-sm" id="btnMatchVendors">
-                            <i class="fas fa-link"></i> Match Suppliers to Vendor Strategies
-                        </button>
-                    </div>
                     <div id="vendorMatchResult" style="display:none;margin-top:12px">
                         <div id="vendorMatchSummary" style="margin-bottom:10px"></div>
                         <div id="vendorSupplierSummary" style="margin-top:14px"></div>
@@ -415,109 +448,9 @@
             </div>
         </div>
 
-        <!-- Card 2: File Upload & Validation -->
-        <div class="card">
-            <h3><i class="fas fa-cloud-arrow-up"></i> Upload & Validate SKU List</h3>
-            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
-                Upload your SKU list (.xlsx or .csv) to validate data formatting.
-            </p>
-
-            <div class="drop-zone" id="dropZone">
-                <i class="fas fa-file-arrow-up" style="font-size:2.5rem;color:var(--hd-orange);margin-bottom:8px"></i>
-                <p>Drag & drop your .xlsx or .csv file here</p>
-                <p style="font-size:.78rem;color:var(--hd-medium-gray)">or click to browse (max 10 MB)</p>
-                <input type="file" id="fileInput" accept=".xlsx,.csv" style="display:none" />
-            </div>
-            <div id="fileName" style="margin-top:8px;font-size:.85rem;color:var(--hd-medium-gray)"></div>
-
-            <!-- Validation Results -->
-            <div id="validationResults" style="display:none;margin-top:16px">
-                <h4 style="margin-bottom:8px">Validation Checks</h4>
-                <div id="checksList"></div>
-
-                <!-- Errors -->
-                <div id="errorSection" style="display:none;margin-top:12px">
-                    <h4 style="color:var(--hd-red);margin-bottom:8px"><i class="fas fa-times-circle"></i> Errors</h4>
-                    <div class="table-container" style="max-height:300px;overflow:auto">
-                        <table class="detail-table" id="errorTable" style="font-size:.72rem;white-space:nowrap">
-                            <thead><tr><th>Row</th><th>Column</th><th>Error</th><th>THD_SKU_NBR</th><th>SISTER_SKU_NBR</th><th>SKU_DESC</th><th>SUPPLIER</th><th>MVNDR_NBR</th><th>FACTORY_ID</th><th>BP</th><th>BUY_UNITS</th><th>WAVE_1</th><th>WAVE_2</th><th>WAVE_3</th><th>WAVE_4</th><th>WAVE_5</th></tr></thead>
-                            <tbody id="errorTableBody"></tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- FYI Warnings -->
-                <div id="warningSection" style="display:none;margin-top:12px">
-                    <h4 style="color:#b8860b;margin-bottom:8px"><i class="fas fa-info-circle"></i> FYI</h4>
-                    <div class="table-container" style="max-height:200px;overflow:auto">
-                        <table class="detail-table" id="warningTable" style="font-size:.72rem;white-space:nowrap">
-                            <thead><tr><th>Row</th><th>Column</th><th>Message</th><th>THD_SKU_NBR</th><th>SISTER_SKU_NBR</th><th>SKU_DESC</th><th>SUPPLIER</th><th>MVNDR_NBR</th><th>FACTORY_ID</th><th>BP</th><th>BUY_UNITS</th><th>WAVE_1</th><th>WAVE_2</th><th>WAVE_3</th><th>WAVE_4</th><th>WAVE_5</th></tr></thead>
-                            <tbody id="warningTableBody"></tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Success Summary -->
-                <div id="successSection" style="display:none;margin-top:12px">
-                    <div id="autoInsertStatus" style="display:none;margin-bottom:12px"></div>
-                    <div id="thdKeyInfo" style="display:none;margin-bottom:10px;padding:8px 12px;background:#f5f5f5;border-radius:6px;font-size:.82rem">
-                        <strong>THD_KEY:</strong> <span id="thdKeyLabel"></span>
-                    </div>
-                    <div class="kpi-cards" style="justify-content:flex-start">
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumRows">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Rows</div>
-                        </div>
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumBuyUnits">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Total Buy Units</div>
-                        </div>
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumOptimalBuy">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Optimal Buy Units</div>
-                        </div>
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumSuppliers">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Suppliers</div>
-                        </div>
-                        <div class="kpi-card" id="sumFactoriesCard" style="display:none">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumFactories">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Factories</div>
-                        </div>
-                    </div>
-                    <!-- Factory distribution table (imports only) -->
-                    <div id="factoryDistribution" style="display:none;margin-top:12px">
-                        <h5 style="margin-bottom:6px;font-size:.82rem;color:var(--hd-dark-gray)">Factory Distribution</h5>
-                        <div class="table-container" style="max-height:200px;overflow-y:auto">
-                            <table class="detail-table" style="font-size:.8rem">
-                                <thead><tr><th>Factory ID</th><th style="text-align:right">SKUs<br><span style="font-weight:normal;font-size:.65rem;color:#888">distinct THD Keys</span></th><th style="text-align:right">Optimal Buy Units</th><th style="text-align:right">Containers</th></tr></thead>
-                                <tbody id="factoryDistBody"></tbody>
-                            </table>
-                        </div>
-                        <button class="btn btn-secondary" id="btnDownloadFactoryDist" style="margin-top:8px;font-size:.75rem">
-                            <i class="fas fa-download"></i> Download Factory Distribution
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Import mismatch alert -->
-                <div id="importMismatchAlert" style="display:none;margin-top:12px;padding:14px 16px;background:#fff3cd;border:1px solid #ffc107;border-radius:8px">
-                    <i class="fas fa-exclamation-triangle" style="color:#856404;margin-right:6px"></i>
-                    <strong style="color:#856404">Import file detected!</strong>
-                    <p style="margin:6px 0 0;color:#856404;font-size:.85rem">
-                        This file contains a <code>FACTORY_ID</code> column, which indicates an import file.
-                        Please go back to <strong>Step 1</strong> and select <strong>"Includes Imports"</strong> with your container size.
-                    </p>
-                    <button class="btn btn-secondary" style="margin-top:10px;font-size:.8rem" onclick="goStep(1)">
-                        <i class="fas fa-arrow-left"></i> Go to Step 1
-                    </button>
-                </div>
-            </div>
-        </div>
-
         <div class="wizard-nav">
             <button class="btn btn-secondary" onclick="goStep(1)"><i class="fas fa-arrow-left"></i> Back</button>
-            <button class="btn btn-primary" id="btnGoInsert" onclick="goStep(3)">Next <i class="fas fa-arrow-right"></i></button>
+            <button class="btn btn-primary" id="btnGoInsert">Next <i class="fas fa-arrow-right"></i></button>
         </div>
     </section>
 

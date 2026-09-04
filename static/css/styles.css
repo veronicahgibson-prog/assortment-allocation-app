@@ -124,9 +124,12 @@ code {
   margin-bottom: 6px; color: var(--hd-dark-gray); font-size: .82rem; font-weight: 700;
 }
 .prior-strategy-detail-row {
-  display: grid; grid-template-columns: minmax(130px, .8fr) 90px minmax(180px, 2fr);
+  display: grid; grid-template-columns: minmax(180px, 2fr) 90px minmax(130px, 1fr);
   gap: 12px; align-items: center; padding: 7px 0;
   border-top: 1px solid #f0e4dc; font-size: .78rem;
+}
+.prior-strategy-detail-row-vendor {
+  grid-template-columns: minmax(180px, 2fr) 90px minmax(130px, 1fr) 110px;
 }
 .prior-strategy-detail-row span { color: var(--hd-medium-gray); }
 .prior-strategy-detail-row small { color: var(--hd-dark-gray); }
@@ -304,16 +307,20 @@ code {
 }
 .dc-toggle-btn:hover { border-color: var(--hd-orange); }
 .dc-toggle-btn.active {
-  border-color: var(--hd-orange);
-  background: var(--hd-orange);
+  border-color: var(--hd-orange-light);
+  background: var(--hd-orange-light);
   color: #fff;
 }
 
-.vendor-dc-help {
-  margin: 0 0 10px;
-  color: var(--hd-medium-gray);
+.vendor-reconcile-card { margin-bottom: 16px; }
+.vendor-reconcile-namelist {
+  margin-top: 10px;
   font-size: .82rem;
+  color: var(--hd-dark-gray);
 }
+.vendor-reconcile-namelist strong { margin-right: 4px; }
+.vendor-new-icon { color: var(--hd-green); margin-right: 2px; }
+.vendor-supplier-new td { background: #f3fbf3; }
 .vendor-dc-list {
   display: flex; flex-direction: column; gap: 8px;
   max-height: 300px; overflow-y: auto;
@@ -322,14 +329,13 @@ code {
   max-height: 300px;
   overflow-y: auto;
 }
-.vendor-dc-table th:nth-child(1),
-.vendor-dc-table th:nth-child(3),
-.vendor-dc-table td:nth-child(1),
-.vendor-dc-table td:nth-child(3) {
+.vendor-dc-table th:nth-child(2),
+.vendor-dc-table th:nth-child(4) {
   text-align: right;
   white-space: nowrap;
 }
-.vendor-dc-table td:nth-child(4) {
+.vendor-dc-count { text-align: right; white-space: nowrap; }
+.vendor-dc-table td:first-child {
   min-width: 260px;
 }
 .vendor-dc-card {
@@ -369,20 +375,20 @@ code {
   font-size: .78rem;
   background: #fff;
 }
-.vendor-sku-table th:nth-child(4),
-.vendor-sku-table th:nth-child(5),
-.vendor-sku-table td:nth-child(4),
-.vendor-sku-table td:nth-child(5),
+.vendor-sku-table th:nth-child(2),
+.vendor-sku-table td:nth-child(2),
 .vendor-sku-table th:nth-child(6),
-.vendor-sku-table td:nth-child(6) {
+.vendor-sku-table td:nth-child(6),
+.vendor-sku-table th:nth-child(7),
+.vendor-sku-table td:nth-child(7) {
   text-align: right;
   white-space: nowrap;
 }
-.vendor-sku-table td:nth-child(7) {
+.vendor-sku-table td:first-child {
   min-width: 240px;
 }
 .vendor-sku-table .vendor-dc-btn {
-  width: 44px; height: 32px; font-size: .72rem;
+  width: 32px; height: 26px; font-size: .68rem;
 }
 .vendor-sku-loading {
   padding: 10px;
@@ -558,6 +564,5 @@ code {
   .stepper { flex-wrap: wrap; gap: 8px; }
   .stepper::before { display: none; }
   .prior-strategy-metrics { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
-  .prior-strategy-detail-row { grid-template-columns: 1fr 70px; }
-  .prior-strategy-detail-row small { grid-column: 1 / -1; }
+  .prior-strategy-detail-row, .prior-strategy-detail-row-vendor { grid-template-columns: 1fr; gap: 2px; }
 }

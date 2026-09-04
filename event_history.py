@@ -3,6 +3,7 @@ table (not this app's own CM_TEMP scratch tables) — EVENTS_SKU_DFC_ALLOCATIONS
 Backfilled with EVENT_NAME/EVENT_YEAR/IS_IMPORT this session; see
 alter_events_dfc_allocations.sql for the schema history.
 """
+from typing import Optional
 from google.cloud import bigquery
 from config import DC_NAMES, CAMPUS_PAIRS, EVENTS_SKU_LIST, VENDOR_STRATEGY
 
@@ -31,30 +32,42 @@ def _dc_list_names(dc_list_key: str) -> str:
     return ", ".join(_dc_name(int(d)) for d in dc_list_key.split("-"))
 
 
-def _attach_vendor_strategy(client: bigquery.Client, supplier_rows) -> list:
-    """Pair each supplier with its VENDOR_ALIGNED_STRATEGY row so the DC count
-    and DC list shown are the vendor's aligned strategy, not whatever DCs the
-    historical rows happened to touch. Uses the same substring rule as
-    /api/match_vendor_strategy so Step 1 and Step 2 can't disagree about which
-    vendor a supplier belongs to."""
+def _load_vendor_strategy_rows(client: bigquery.Client) -> tuple:
+    """VENDOR_ALIGNED_STRATEGY rows plus its OTHER fallback row, shared by every
+    substring-match lookup below so they can't drift apart."""
     vs_rows = [dict(r) for r in client.query(
         f"SELECT VENDOR, ASMT_ID, DC_COUNT, DC_LIST, DC_NM_LIST FROM {VENDOR_STRATEGY}"
     ).result()]
     other = next((v for v in vs_rows if (v["VENDOR"] or "").upper() == "OTHER"), None)
+    return vs_rows, other
+
+
+def _match_vendor(vs_rows: list, other: Optional[dict], supplier: str) -> Optional[dict]:
+    """The canonical VENDOR_ALIGNED_STRATEGY row for a raw supplier name, using
+    the same substring rule as /api/match_vendor_strategy so every view of
+    vendor identity in this app agrees. Falls back to the OTHER row when no
+    vendor-specific strategy matches."""
+    sup_upper = (supplier or "").upper().strip()
+    match = next(
+        (v for v in vs_rows if (v["VENDOR"] or "").upper().strip() in sup_upper),
+        None,
+    )
+    return match or other
+
+
+def _attach_vendor_strategy(client: bigquery.Client, supplier_rows) -> list:
+    """Pair each supplier with its VENDOR_ALIGNED_STRATEGY row so the DC count
+    and DC list shown are the vendor's aligned strategy, not whatever DCs the
+    historical rows happened to touch."""
+    vs_rows, other = _load_vendor_strategy_rows(client)
 
     out = []
     for r in supplier_rows:
         supplier = r.SUPPLIER
-        sup_upper = supplier.upper().strip()
-        match = next(
-            (v for v in vs_rows if (v["VENDOR"] or "").upper().strip() in sup_upper),
-            None,
-        ) if supplier != "Unknown" else None
         # "Unknown" means the SKU never appeared in an uploaded list for this
         # event, so there's no supplier name to match on at all — distinct from
         # a real supplier that simply has no vendor-specific strategy.
-        if match is None and supplier != "Unknown":
-            match = other
+        match = _match_vendor(vs_rows, other, supplier) if supplier != "Unknown" else None
         out.append({
             "supplier": supplier,
             "sku_count": r.SKU_COUNT,
@@ -149,21 +162,48 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
     strategy_type = overall_rows[0].strategy_type
     strategy_summary = []
     if strategy_type and strategy_type.upper() == "VENDOR-ALIGNED":
+        # Raw SUPPLIER text in the history table has near-duplicate casing
+        # variants for the same real vendor (e.g. "DEWALT" vs "Dewalt") — group
+        # by DC_NBR/THD key per raw supplier first, then collapse onto the
+        # canonical VENDOR_ALIGNED_STRATEGY name below so those variants merge
+        # into one row instead of showing up as separate "vendors."
         vendor_rows = client.query(f"""
-            SELECT SUPPLIER AS vendor,
-                   COUNT(DISTINCT DC_NBR) AS dc_count,
-                   ARRAY_TO_STRING(ARRAY_AGG(DISTINCT CAST(DC_NBR AS STRING) ORDER BY CAST(DC_NBR AS STRING)), ', ') AS dc_list
+            SELECT SUPPLIER,
+                   ARRAY_AGG(DISTINCT DC_NBR) AS dc_nbrs,
+                   COUNT(DISTINCT CONCAT({_sku_key}, '|', COALESCE(CAST(FACTORY_ID AS STRING), 'NA'))) AS thd_key_count
             FROM {HISTORY_TABLE}
             WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
               AND SUPPLIER IS NOT NULL
             GROUP BY SUPPLIER
-            ORDER BY vendor
         """, job_config=detail_job_config).result()
+
+        vs_rows, other = _load_vendor_strategy_rows(client)
+        by_vendor = {}
+        for r in vendor_rows:
+            match = _match_vendor(vs_rows, other, r.SUPPLIER)
+            vendor_name = (match["VENDOR"] if match else r.SUPPLIER).upper().strip()
+            entry = by_vendor.setdefault(vendor_name, {"dc_nbrs": set(), "thd_key_count": 0})
+            entry["dc_nbrs"].update(r.dc_nbrs or [])
+            entry["thd_key_count"] += r.thd_key_count
+
+        # A second collapse: distinct vendors whose aligned strategy happens to
+        # land on the identical DC list are shown as one row, vendor names
+        # comma-joined alphabetically — the DC list is the primary grouping key
+        # the requester wants surfaced first, not the vendor name.
+        by_dc_list = {}
+        for vendor_name, entry in by_vendor.items():
+            dc_list = ", ".join(str(d) for d in sorted(entry["dc_nbrs"]))
+            row = by_dc_list.setdefault(dc_list, {"dc_count": len(entry["dc_nbrs"]), "vendors": [], "thd_key_count": 0})
+            row["vendors"].append(vendor_name)
+            row["thd_key_count"] += entry["thd_key_count"]
+
         strategy_summary = [{
-            "vendor": r.vendor,
-            "dc_count": r.dc_count,
-            "dc_list": r.dc_list,
-        } for r in vendor_rows]
+            "dc_list": dc_list,
+            "dc_name_list": ", ".join(_dc_name(int(d)) for d in dc_list.split(", ")) if dc_list else "",
+            "dc_count": row["dc_count"],
+            "vendor": ", ".join(sorted(row["vendors"])),
+            "thd_key_count": row["thd_key_count"],
+        } for dc_list, row in sorted(by_dc_list.items(), key=lambda kv: (-kv[1]["dc_count"], kv[1]["vendors"]))]
     elif strategy_type:
         asmt_rows = client.query(f"""
             SELECT ASMT_ID AS asmt_id,
