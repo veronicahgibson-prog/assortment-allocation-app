@@ -606,6 +606,7 @@ STAGED_SKU_LIST AS (
   SELECT
     OG.EVENT_NAME, OG.EVENT_YEAR, OG.BP, OG.BUY_UNITS,
     OG.W1_UNITS, OG.W2_UNITS, OG.W3_UNITS, OG.W4_UNITS, OG.W5_UNITS,
+    OG.WAVE_DATA_PRESENT,
     OG.SUPPLIER, OG.MVNDR_NBR, OG.FACTORY_ID,
     OG.THD_SKU_NBR,
     OG.SISTER_SKU_NBR,
@@ -1156,11 +1157,80 @@ def api_cost_model_preview():
         return jsonify({"error": str(e)}), 500
 
 
+_ALL_DC_NBRS = sorted(DC_NAMES.keys())
+
+
+def _parse_dc_list(dc_list_str):
+    """DC_LIST is always a "5820, 5823, ..." style string throughout this
+    app — pull the numbers out regardless of separator."""
+    if not dc_list_str:
+        return None
+    nbrs = sorted({int(x) for x in re.findall(r"\d+", str(dc_list_str))})
+    return nbrs or None
+
+
+def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vendor_matches):
+    """One row per (SKU_NBR, effective DC list): a SKU_NBR normally rolls up
+    under its supplier's matched DC_LIST, but a THD_SKU_NBR carrying a
+    per-SKU override (Step 2's SKU drill-down) breaks out into its own row
+    whenever that override differs from the rest of its SKU_NBR family."""
+    default_dcs_by_supplier = {}
+    overrides_by_thd_sku = {}
+    for m in vendor_matches:
+        supplier = (m.get("SUPPLIER") or "").strip()
+        if supplier:
+            default_dcs_by_supplier[supplier] = _parse_dc_list(m.get("DC_LIST"))
+        for thd_sku, dcs in (m.get("SKU_OVERRIDES") or {}).items():
+            try:
+                overrides_by_thd_sku[int(thd_sku)] = sorted({int(d) for d in dcs})
+            except (TypeError, ValueError):
+                continue
+
+    rows = bq().query(f"""
+        SELECT SKU_NBR, THD_SKU_NBR, SUPPLIER, BUY_UNITS
+        FROM {EVENTS_SKU_LIST}
+        WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+    """, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ])).result()
+
+    groups = {}
+    for r in rows:
+        dc_list = overrides_by_thd_sku.get(r.THD_SKU_NBR) or default_dcs_by_supplier.get((r.SUPPLIER or "").strip())
+        key = (r.SKU_NBR, tuple(dc_list) if dc_list else None)
+        groups[key] = groups.get(key, 0) + (r.BUY_UNITS or 0)
+
+    out = []
+    for (sku_nbr, dc_list), buy_qty in groups.items():
+        if dc_list:
+            inclusions = ", ".join(str(d) for d in dc_list)
+            exclusions = ", ".join(str(d) for d in _ALL_DC_NBRS if d not in dc_list)
+            target_count = str(len(dc_list))
+        else:
+            # No vendor match covers this SKU's supplier and no override
+            # exists — same as the pre-existing behavior, leave it null
+            # rather than guess.
+            inclusions = exclusions = target_count = None
+        out.append({
+            "sku_nbr": str(sku_nbr),
+            "buy_qty": str(buy_qty),
+            "target_dc_count": target_count,
+            "dc_inclusions": inclusions,
+            "dc_exclusions": exclusions,
+        })
+    return out
+
+
 @app.route("/api/submit_cost_model", methods=["POST"])
 def api_submit_cost_model():
-    """Insert per-SKU rows into DFC_COST_MODEL_SUBMISSION from EVENTS_SKU_LIST."""
+    """Insert per-SKU rows into DFC_COST_MODEL_SUBMISSION from EVENTS_SKU_LIST.
+    When vendor_matches (Step 2's resolved vendor-aligned DC assignments) are
+    supplied, target_dc_count/dc_inclusions/dc_exclusions are populated from
+    them instead of left null."""
     body = request.get_json(silent=True) or {}
     event_name = body.get("event_name", "")
+    vendor_matches = body.get("vendor_matches") or []
     if not event_name:
         return jsonify({"error": "event_name is required"}), 400
 
@@ -1195,32 +1265,69 @@ def api_submit_cost_model():
         email_rows = list(bq().query(email_q, job_config=email_jc).result())
         email = email_rows[0].EMAIL_ADDR_TXT if email_rows else f"{CURRENT_USER}@homedepot.com"
 
-        submission_sql = f"""
-            INSERT INTO {DFC_COST_MODEL_SUBMISSION}
-              (date_added, `key`, project_name, bucket, sku_nbr, buy_qty,
-               email, target_dc_count, dc_inclusions, dc_exclusions)
-            SELECT
-              CURRENT_DATE() AS date_added,
-              @key AS `key`,
-              @project_name AS project_name,
-              @project_name AS bucket,
-              SAFE_CAST(SKU_NBR AS STRING) AS sku_nbr,
-              CAST(SUM(BUY_UNITS) AS STRING) AS buy_qty,
-              @email AS email,
-              CAST(NULL AS STRING) AS target_dc_count,
-              CAST(NULL AS STRING) AS dc_inclusions,
-              CAST(NULL AS STRING) AS dc_exclusions
-            FROM {EVENTS_SKU_LIST}
-            WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
-            GROUP BY SKU_NBR
-        """
-        sub_config = bigquery.QueryJobConfig(query_parameters=[
+        base_params = [
             bigquery.ScalarQueryParameter("key", "STRING", key),
             bigquery.ScalarQueryParameter("project_name", "STRING", project_name),
             bigquery.ScalarQueryParameter("email", "STRING", email),
-            bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
-            bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
-        ])
+        ]
+
+        if vendor_matches:
+            computed_rows = _compute_vendor_aligned_submission_rows(bq(), event_name, event_year, vendor_matches)
+            if not computed_rows:
+                return jsonify({"error": f"No rows found for event '{event_name}'"}), 400
+            struct_rows = [
+                bigquery.StructQueryParameter(
+                    None,
+                    bigquery.ScalarQueryParameter("sku_nbr", "STRING", r["sku_nbr"]),
+                    bigquery.ScalarQueryParameter("buy_qty", "STRING", r["buy_qty"]),
+                    bigquery.ScalarQueryParameter("target_dc_count", "STRING", r["target_dc_count"]),
+                    bigquery.ScalarQueryParameter("dc_inclusions", "STRING", r["dc_inclusions"]),
+                    bigquery.ScalarQueryParameter("dc_exclusions", "STRING", r["dc_exclusions"]),
+                )
+                for r in computed_rows
+            ]
+            submission_sql = f"""
+                INSERT INTO {DFC_COST_MODEL_SUBMISSION}
+                  (date_added, `key`, project_name, bucket, sku_nbr, buy_qty,
+                   email, target_dc_count, dc_inclusions, dc_exclusions)
+                SELECT
+                  CURRENT_DATE() AS date_added,
+                  @key AS `key`,
+                  @project_name AS project_name,
+                  @project_name AS bucket,
+                  r.sku_nbr, r.buy_qty,
+                  @email AS email,
+                  r.target_dc_count, r.dc_inclusions, r.dc_exclusions
+                FROM UNNEST(@rows) AS r
+            """
+            sub_config = bigquery.QueryJobConfig(query_parameters=base_params + [
+                bigquery.ArrayQueryParameter("rows", "STRUCT", struct_rows),
+            ])
+        else:
+            submission_sql = f"""
+                INSERT INTO {DFC_COST_MODEL_SUBMISSION}
+                  (date_added, `key`, project_name, bucket, sku_nbr, buy_qty,
+                   email, target_dc_count, dc_inclusions, dc_exclusions)
+                SELECT
+                  CURRENT_DATE() AS date_added,
+                  @key AS `key`,
+                  @project_name AS project_name,
+                  @project_name AS bucket,
+                  SAFE_CAST(SKU_NBR AS STRING) AS sku_nbr,
+                  CAST(SUM(BUY_UNITS) AS STRING) AS buy_qty,
+                  @email AS email,
+                  CAST(NULL AS STRING) AS target_dc_count,
+                  CAST(NULL AS STRING) AS dc_inclusions,
+                  CAST(NULL AS STRING) AS dc_exclusions
+                FROM {EVENTS_SKU_LIST}
+                WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+                GROUP BY SKU_NBR
+            """
+            sub_config = bigquery.QueryJobConfig(query_parameters=base_params + [
+                bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+                bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+            ])
+
         job = bq().query(submission_sql, job_config=sub_config)
         job.result()
         rows_inserted = job.num_dml_affected_rows or 0

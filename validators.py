@@ -204,12 +204,21 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False) -> dict:
             if waves_changed:
                 for wi, w in enumerate(present_waves):
                     df.at[idx, w] = str(floored[wi])
-                old_waves = " | ".join(f"{present_waves[wi]}={raw_waves[wi]}" for wi in range(len(present_waves)) if raw_waves[wi] > 0)
-                new_waves = " | ".join(f"{present_waves[wi]}={floored[wi]}" for wi in range(len(present_waves)) if floored[wi] > 0 or raw_waves[wi] > 0)
                 if not has_waves and floored[0] > 0:
-                    wave_message = f"No wave data for this record; moved {floored[0]} BUY_UNITS to WAVE_1"
+                    wave_message = f"WAVE_1 has been populated with the BUY_UNITS ({floored[0]})"
                 else:
-                    wave_message = f"Waves adjusted: [{old_waves}] → [{new_waves}]"
+                    # Each wave listed once — only the changed ones carry a
+                    # "(vs old)" so an unchanged wave isn't shown twice just to
+                    # prove it didn't move.
+                    wave_parts = []
+                    for wi in range(len(present_waves)):
+                        if floored[wi] <= 0 and raw_waves[wi] <= 0:
+                            continue
+                        part = f"{present_waves[wi]} = {floored[wi]}"
+                        if floored[wi] != raw_waves[wi]:
+                            part += f" (vs {raw_waves[wi]})"
+                        wave_parts.append(part)
+                    wave_message = f"Waves Adjusted: {' | '.join(wave_parts)}"
                 wave_warnings.append({
                     "row": int(idx) + 2, "column": "WAVES",
                     "row_data": {c: str(df.at[idx, c]) if pd.notna(df.at[idx, c]) else "" for c in df.columns},
