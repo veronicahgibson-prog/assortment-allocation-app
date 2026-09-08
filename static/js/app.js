@@ -768,8 +768,13 @@
             }
             if (selectedStrategy === "VENDOR_ALIGNED") {
                 if (!vendorStrategyConfirmed) {
-                    toast("Please match and confirm vendor strategies before proceeding", "error");
-                    return;
+                    // Matching already ran automatically once a valid file
+                    // was uploaded (see handleFile) — proceeding past this
+                    // point without an explicit Confirm click just means
+                    // running that same commit now, on the user's behalf,
+                    // rather than blocking them on a click they skipped.
+                    const confirmed = await confirmVendorStrategy();
+                    if (!confirmed) return;
                 }
             } else if (!dataInserted) {
                 const inserted = await doInsert(false);
@@ -777,6 +782,26 @@
             }
             goStep(6);
         });
+    }
+
+    // Shared commit path for Vendor-Aligned: writes the upload to
+    // EVENTS_SKU_LIST (if not already done) and submits SKU-level rows into
+    // DFC_COST_MODEL_SUBMISSION. Used by the explicit "Confirm Vendor
+    // Strategies" button and by Step 2's Next button when the user proceeds
+    // without clicking Confirm themselves. Returns whether it succeeded.
+    async function confirmVendorStrategy() {
+        if (!dataInserted) {
+            const inserted = await doInsert(false);
+            if (!inserted) return false;
+        }
+        const submitted = await submitCostModel();
+        if (!submitted) return false;
+        vendorStrategyConfirmed = true;
+        $("#btnConfirmVendorStrategy").disabled = true;
+        $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
+        toast("Vendor strategies confirmed", "success");
+        renderVendorPieChart(vendorMatches);
+        return true;
     }
 
     async function doInsert(overwrite) {
@@ -830,10 +855,14 @@
     async function loadCostModelPreview() {
         if (!eventName) return;
         try {
+            // vendorMatches makes this a true preview of the row set
+            // /api/submit_cost_model would actually insert into
+            // DFC_COST_MODEL_SUBMISSION (target_dc_count/dc_inclusions/
+            // dc_exclusions included) rather than a looser approximation.
             const result = await api("/api/cost_model_preview", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ event_name: eventName }),
+                body: JSON.stringify({ event_name: eventName, vendor_matches: vendorMatches }),
             });
             if (result.error) return;
 
@@ -881,7 +910,12 @@
             tbody.innerHTML = "";
             for (const r of result.rows) {
                 const tr = document.createElement("tr");
-                tr.innerHTML = `<td>${r.sku_nbr}</td><td style="text-align:right">${Number(r.buy_qty).toLocaleString()}</td><td>${r.IS_SISTER_SKU_FLAG ? "Sister" : "THD"}</td>`;
+                tr.innerHTML = `<td>${r.sku_nbr}</td>`
+                    + `<td style="text-align:right">${Number(r.buy_qty).toLocaleString()}</td>`
+                    + `<td>${r.target_dc_count ?? "—"}</td>`
+                    + `<td>${r.dc_inclusions ?? "—"}</td>`
+                    + `<td>${r.dc_exclusions ?? "—"}</td>`
+                    + `<td>${r.IS_SISTER_SKU_FLAG ? "Sister" : "THD"}</td>`;
                 tbody.appendChild(tr);
             }
             $("#costModelPreview").style.display = "block";
@@ -1102,20 +1136,10 @@
         // Vendor-Aligned: it writes this upload to EVENTS_SKU_LIST (deferred
         // until now, not automatic at upload time) and then submits SKU-level
         // rows into DFC_COST_MODEL_SUBMISSION, so a strategy isn't
-        // "confirmed" unless both of those actually went through.
-        $("#btnConfirmVendorStrategy")?.addEventListener("click", async () => {
-            if (!dataInserted) {
-                const inserted = await doInsert(false);
-                if (!inserted) return;
-            }
-            const submitted = await submitCostModel();
-            if (!submitted) return;
-            vendorStrategyConfirmed = true;
-            $("#btnConfirmVendorStrategy").disabled = true;
-            $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
-            toast("Vendor strategies confirmed", "success");
-            renderVendorPieChart(vendorMatches);
-        });
+        // "confirmed" unless both of those actually went through. Shared with
+        // Step 2's Next button, which runs this same commit automatically if
+        // the user proceeds without clicking Confirm themselves.
+        $("#btnConfirmVendorStrategy")?.addEventListener("click", confirmVendorStrategy);
 
         // Load DC counts button
         $("#btnLoadDcCounts")?.addEventListener("click", loadAvailableDcCounts);

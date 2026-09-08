@@ -1032,6 +1032,103 @@ def api_match_vendor_strategy():
         return jsonify({"error": str(e)}), 500
 
 
+# DCs whose VENDOR_ALIGNED_STRATEGY.DC_NM_LIST entry carries a "MAIN" suffix
+# to distinguish them from their campus-paired bulk facility (see CAMPUS_PAIRS
+# in config.py) — the existing table data follows this convention for the
+# handful of DCs that actually have a bulk counterpart.
+_CAMPUS_MAIN_SUFFIX = {6007, 6777}
+
+
+def _dc_display_name(dc_nbr):
+    name = DC_NAMES.get(dc_nbr, f"DC {dc_nbr}")
+    return f"{name} MAIN" if dc_nbr in _CAMPUS_MAIN_SUFFIX else name
+
+
+@app.route("/api/vendor_strategy/add", methods=["POST"])
+def api_add_vendor_strategy():
+    """Add a new vendor row to VENDOR_ALIGNED_STRATEGY. ASMT_ID is left NULL —
+    it's only known once the assortment tool has been run for this vendor's
+    DC group and produced a RUN_ID/CAMP_ASMT_ID, which happens after this
+    step in the workflow."""
+    body = request.get_json(silent=True) or {}
+    vendor = (body.get("vendor") or "").strip().upper()
+    dc_list = body.get("dc_list") or []
+    if not vendor:
+        return jsonify({"error": "Vendor name is required."}), 400
+    try:
+        dc_list = sorted({int(d) for d in dc_list})
+    except (TypeError, ValueError):
+        return jsonify({"error": "dc_list must be a list of DC numbers."}), 400
+    if not dc_list:
+        return jsonify({"error": "Select at least one DC."}), 400
+    unknown = [d for d in dc_list if d not in DC_NAMES]
+    if unknown:
+        return jsonify({"error": f"Unknown DC number(s): {unknown}. Add them to the DC network first."}), 400
+
+    try:
+        dup_q = f"SELECT COUNT(*) AS cnt FROM {VENDOR_STRATEGY} WHERE UPPER(VENDOR) = @vendor"
+        dup_jc = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("vendor", "STRING", vendor),
+        ])
+        if list(bq().query(dup_q, job_config=dup_jc).result())[0].cnt > 0:
+            return jsonify({"error": f"'{vendor}' already has a vendor-aligned strategy row."}), 409
+
+        dc_list_str = "-".join(str(d) for d in dc_list)
+        dc_nm_list_str = "-".join(_dc_display_name(d) for d in dc_list)
+        insert_sql = f"""
+            INSERT INTO {VENDOR_STRATEGY} (VENDOR, ASMT_ID, DC_LIST, DC_COUNT, DC_NM_LIST)
+            VALUES (@vendor, NULL, @dc_list, @dc_count, @dc_nm_list)
+        """
+        jc = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("vendor", "STRING", vendor),
+            bigquery.ScalarQueryParameter("dc_list", "STRING", dc_list_str),
+            bigquery.ScalarQueryParameter("dc_count", "INT64", len(dc_list)),
+            bigquery.ScalarQueryParameter("dc_nm_list", "STRING", dc_nm_list_str),
+        ])
+        bq().query(insert_sql, job_config=jc).result()
+        logger.info(f"Added vendor strategy row for {vendor}: {dc_list_str}")
+        return jsonify({
+            "success": True,
+            "message": f"Added {vendor} to VENDOR_ALIGNED_STRATEGY. ASMT_ID will need to be filled in once the assortment tool has been run for this vendor.",
+            "vendor": vendor, "dc_list": dc_list, "dc_count": len(dc_list), "dc_nm_list": dc_nm_list_str,
+        })
+    except Exception as e:
+        logger.exception("Add vendor strategy error")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/dc_network/add", methods=["POST"])
+def api_add_dc_network():
+    """Register a new DC number/name for this running app instance.
+
+    DC_NAMES/ALLOWED_DFCS are plain Python constants in config.py, not a
+    BigQuery table — so this only extends the in-memory dict for the
+    lifetime of this server process. Making it durable across restarts
+    means adding the DC to config.py (and deploying), or standing up a real
+    DC-master table; this endpoint deliberately doesn't do either on its own.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        dc_nbr = int(body.get("dc_nbr"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "dc_nbr must be a number."}), 400
+    dc_name = (body.get("dc_name") or "").strip()
+    if not dc_name:
+        return jsonify({"error": "dc_name is required."}), 400
+    if dc_nbr in DC_NAMES:
+        return jsonify({"error": f"DC {dc_nbr} already exists ({DC_NAMES[dc_nbr]})."}), 409
+
+    DC_NAMES[dc_nbr] = dc_name
+    logger.warning(f"Added DC {dc_nbr} ({dc_name}) to the in-memory DC network — "
+                    "this does not persist past a server restart; update config.py to make it permanent.")
+    return jsonify({
+        "success": True,
+        "message": f"Added DC {dc_nbr} ({dc_name}) for this session. This won't survive a restart — "
+                    "add it to config.py's DC_NAMES (and ALLOWED_DFCS for the relevant event types) to make it permanent.",
+        "dc_names": {str(k): v for k, v in DC_NAMES.items()},
+    })
+
+
 # ── Section 4b: DFC Cost Model Submission ────────────────────────────
 
 @app.route("/api/vendor_skus")
@@ -1113,9 +1210,15 @@ def api_vendor_skus():
 
 @app.route("/api/cost_model_preview", methods=["POST"])
 def api_cost_model_preview():
-    """Return SKU breakdown by sister flag for charts + table preview."""
+    """Return SKU breakdown by sister flag for charts + table preview.
+    The table preview's sku_nbr/buy_qty/target_dc_count/dc_inclusions/
+    dc_exclusions mirror exactly what /api/submit_cost_model would insert
+    into DFC_COST_MODEL_SUBMISSION for the same vendor_matches, so this is
+    always a true preview of the real row set — not a separate, looser
+    approximation of it."""
     body = request.get_json(silent=True) or {}
     event_name = body.get("event_name", "")
+    vendor_matches = body.get("vendor_matches") or []
     if not event_name:
         return jsonify({"error": "event_name is required"}), 400
 
@@ -1144,8 +1247,32 @@ def api_cost_model_preview():
         sister_skus = {r["sku_nbr"] for r in rows if r["IS_SISTER_SKU_FLAG"]}
         overlap_skus = sorted(thd_skus & sister_skus)
 
+        if vendor_matches:
+            # Same computation submission itself runs — the DC breakdown a
+            # vendor-aligned event actually gets, not a stand-in for it. Can
+            # yield more rows than `rows` above (a per-SKU override splits one
+            # SKU_NBR into multiple DC-list rows), so the sister flag is
+            # looked up per sku_nbr rather than assumed 1:1 with `rows`.
+            year_q = f"SELECT DISTINCT EVENT_YEAR FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev LIMIT 1"
+            year_rows = list(bq().query(year_q, job_config=jc).result())
+            event_year = year_rows[0].EVENT_YEAR if year_rows else None
+            sister_by_sku = {r["sku_nbr"]: r["IS_SISTER_SKU_FLAG"] for r in rows}
+            submission_rows = _compute_vendor_aligned_submission_rows(bq(), event_name, event_year, vendor_matches)
+            table_rows = [
+                {**r, "IS_SISTER_SKU_FLAG": sister_by_sku.get(r["sku_nbr"], False)}
+                for r in submission_rows
+            ]
+        else:
+            # Matches the non-vendor-aligned INSERT's own fallback — those
+            # columns are always NULL for this path, so the preview shows the
+            # same nulls rather than omitting the columns.
+            table_rows = [
+                {**r, "target_dc_count": None, "dc_inclusions": None, "dc_exclusions": None}
+                for r in rows
+            ]
+
         return jsonify({
-            "rows": rows,
+            "rows": table_rows,
             "thd_units": thd_units,
             "sister_units": sister_units,
             "thd_count": thd_count,
