@@ -1547,6 +1547,75 @@ def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vend
     return out
 
 
+def _update_events_target_dc(client, event_name, event_year, vendor_matches):
+    """Writes each record's resolved target DC selection onto its own
+    EVENTS_SKU_LIST row, keyed by THD_KEY_ID (always unique) — unlike
+    DFC_COST_MODEL_SUBMISSION, which only carries a proxy SKU_NBR and can't
+    tell apart two records that legitimately share one (e.g. two THD keys
+    differing only by MVNDR_NBR, each with its own per-SKU override). Mirrors
+    _compute_vendor_aligned_submission_rows' own per-row override resolution,
+    just written at the ungrouped record grain instead of rolled up by
+    SKU_NBR."""
+    default_dcs_by_supplier = {}
+    overrides_by_key = {}
+    for m in vendor_matches:
+        supplier = (m.get("SUPPLIER") or "").strip()
+        if supplier:
+            default_dcs_by_supplier[supplier] = _parse_dc_list(m.get("DC_LIST"))
+        for thd_key, dcs in (m.get("SKU_OVERRIDES") or {}).items():
+            try:
+                overrides_by_key[str(thd_key)] = sorted({int(d) for d in dcs})
+            except (TypeError, ValueError):
+                continue
+
+    upload_df = _upload_cache.get("df")
+    key_cols = _determine_thd_key(upload_df, _upload_cache.get("includes_imports", False)) if upload_df is not None else ["THD_SKU_NBR"]
+    base_cols = {"SKU_NBR", "SUPPLIER", "BUY_UNITS", "THD_KEY_ID"}
+    extra_key_cols = [c for c in key_cols if c not in base_cols]
+    sql_cols = [f"{_THD_KEY_COL_TO_EVENTS_SKU_LIST.get(c, c)} AS {c}" for c in extra_key_cols]
+
+    rows = list(client.query(f"""
+        SELECT THD_KEY_ID, SKU_NBR, SUPPLIER, BUY_UNITS{"".join(f", {c}" for c in sql_cols)}
+        FROM {EVENTS_SKU_LIST}
+        WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+    """, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ])).result())
+    if not rows:
+        return 0
+
+    thd_key_ids, target_counts, target_inclusions = [], [], []
+    for r in rows:
+        thd_key = "|".join("__NULL__" if getattr(r, c) is None else str(getattr(r, c)) for c in key_cols)
+        dc_list = overrides_by_key.get(thd_key) or default_dcs_by_supplier.get((r.SUPPLIER or "").strip())
+        thd_key_ids.append(r.THD_KEY_ID)
+        target_counts.append(len(dc_list) if dc_list else None)
+        target_inclusions.append(", ".join(str(d) for d in dc_list) if dc_list else None)
+
+    merge_sql = f"""
+        MERGE {EVENTS_SKU_LIST} T
+        USING (
+            SELECT k AS THD_KEY_ID, c AS TARGET_DC_COUNT, i AS TARGET_DC_INCLUSIONS
+            FROM UNNEST(@thd_key_ids) AS k WITH OFFSET pos1
+            JOIN UNNEST(@target_counts) AS c WITH OFFSET pos2 ON pos1 = pos2
+            JOIN UNNEST(@target_inclusions) AS i WITH OFFSET pos3 ON pos1 = pos3
+        ) S
+        ON T.THD_KEY_ID = S.THD_KEY_ID
+        WHEN MATCHED THEN UPDATE SET
+            T.TARGET_DC_COUNT = S.TARGET_DC_COUNT,
+            T.TARGET_DC_INCLUSIONS = S.TARGET_DC_INCLUSIONS
+    """
+    merge_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter("thd_key_ids", "INT64", thd_key_ids),
+        bigquery.ArrayQueryParameter("target_counts", "INT64", target_counts),
+        bigquery.ArrayQueryParameter("target_inclusions", "STRING", target_inclusions),
+    ])
+    job = client.query(merge_sql, job_config=merge_config)
+    job.result()
+    return job.num_dml_affected_rows or 0
+
+
 @app.route("/api/download_vendor_aligned_table", methods=["POST"])
 def download_vendor_aligned_table():
     """Export every SKU record across all matched suppliers with its
@@ -1755,6 +1824,17 @@ def api_submit_cost_model():
         job.result()
         rows_inserted = job.num_dml_affected_rows or 0
         logger.info(f"Inserted {rows_inserted} rows into DFC_COST_MODEL_SUBMISSION")
+
+        if vendor_matches:
+            # DFC_COST_MODEL_SUBMISSION only carries a proxy SKU_NBR, which can't
+            # disambiguate two records that legitimately share one (different
+            # MVNDR_NBR, different per-SKU override) — so also write each record's
+            # resolved DC selection directly onto its own EVENTS_SKU_LIST row,
+            # keyed by THD_KEY_ID, which the allocation procedure reads from
+            # unambiguously instead of re-deriving it from the submission table.
+            updated = _update_events_target_dc(bq(), event_name, event_year, vendor_matches)
+            logger.info(f"Updated TARGET_DC_COUNT/TARGET_DC_INCLUSIONS on {updated} EVENTS_SKU_LIST rows")
+
         return jsonify({"success": True, "message": f"Submitted {rows_inserted} SKUs to DFC Cost Model.", "row_count": rows_inserted})
     except Exception as e:
         logger.exception("submit_cost_model error")
@@ -2158,7 +2238,11 @@ def api_results():
         page_size = min(int(request.args.get("page_size", 50)), 200)
         sort = request.args.get("sort", "SKU_NBR")
         direction = request.args.get("dir", "ASC").upper()
-        data = fetch_results(bq(), page, page_size, sort, direction)
+        upload_df = _upload_cache.get("df")
+        key_cols = _determine_thd_key(upload_df, _upload_cache.get("includes_imports", False)) if upload_df is not None else ["THD_SKU_NBR"]
+        skip_cols = {"THD_SKU_NBR", "SKU_NBR", "SUPPLIER", "BUY_UNITS", "FACTORY_ID", "SKU_DESC"}
+        extra_key_cols = [(c, _THD_KEY_COL_TO_EVENTS_SKU_LIST.get(c, c)) for c in key_cols if c not in skip_cols]
+        data = fetch_results(bq(), page, page_size, sort, direction, extra_key_cols=extra_key_cols)
         return jsonify(data)
     except Exception as e:
         logger.exception("Results error")
@@ -2199,24 +2283,39 @@ def api_factory_summary():
 @app.route("/api/export_results")
 def api_export_results():
     try:
-        # Matches the actual FINAL_ALLOCATIONS_WIDE schema (see the note in
-        # fetch_results in allocation_engine.py) — there is no THD_SKU_NBR,
-        # SISTER_SKU_NBR, MVNDR_NBR, OG_W*_UNITS, or DFC_W5_UNITS on this table.
-        # FACTORY_CUBE/FACTORY_CONTAINERS are an import-only concept (see
-        # is_import_run) — a domestic run leaves them as a meaningless sum
-        # across every row treated as one factory group, so skip them here too.
-        factory_totals = "FACTORY_CUBE, FACTORY_CONTAINERS" if is_import_run(bq()) else \
-            "CAST(NULL AS FLOAT64) AS FACTORY_CUBE, CAST(NULL AS FLOAT64) AS FACTORY_CONTAINERS"
+        # FINAL_ALLOCATIONS_WIDE has no SISTER_SKU_NBR/MVNDR_NBR itself (its
+        # SKU_NBR is THD_SKU_NBR published under a different name) — whatever
+        # else this upload's THD key needs beyond THD_SKU_NBR (typically
+        # MVNDR_NBR) is joined in from EVENTS_SKU_LIST via the THD_KEY_ID both
+        # tables share, right after SKU_DESC.
+        upload_df = _upload_cache.get("df")
+        key_cols = _determine_thd_key(upload_df, _upload_cache.get("includes_imports", False)) if upload_df is not None else ["THD_SKU_NBR"]
+        skip_cols = {"THD_SKU_NBR", "SKU_NBR", "SUPPLIER", "BUY_UNITS", "FACTORY_ID", "SKU_DESC"}
+        extra_key_cols = [c for c in key_cols if c not in skip_cols]
+        extra_cols_sql = "".join(f", e.{_THD_KEY_COL_TO_EVENTS_SKU_LIST.get(c, c)} AS {c}" for c in extra_key_cols)
+        join_clause = (
+            f"LEFT JOIN {EVENTS_SKU_LIST} e "
+            f"ON e.THD_KEY_ID = f.THD_KEY_ID AND e.EVENT_NAME = f.EVENT_NAME AND e.EVENT_YEAR = f.EVENT_YEAR"
+        ) if extra_key_cols else ""
+
+        # FACTORY_ID/FACTORY_CUBE/FACTORY_CONTAINERS are an import-only
+        # concept — dropped from the export entirely (not just nulled) for a
+        # domestic run, where they'd otherwise be a meaningless sum across
+        # every row treated as one factory group.
+        is_import = is_import_run(bq())
+        factory_cols_sql = ", f.FACTORY_ID, f.FACTORY_CUBE, f.FACTORY_CONTAINERS" if is_import else ""
+
         query = f"""
-            SELECT EVENT_NAME, EVENT_YEAR, THD_KEY_ID, SKU_NBR, SKU_DESC,
-                   SUPPLIER, IS_SISTER_SKU_FLAG, FACTORY_ID,
-                   BP, BUY_UNITS, DC_NBR,
-                   DFC_PCT, DFC_UNITS, DFC_W1_UNITS, DFC_W2_UNITS,
-                   DFC_W3_UNITS, DFC_W4_UNITS,
-                   ITEM_CUBE, RACK_TYPE, {factory_totals},
-                   DFC_CONTAINERS, DFC_CUBE
-            FROM {FINAL_ALLOCATIONS}
-            ORDER BY SKU_NBR, DC_NBR
+            SELECT f.EVENT_NAME, f.EVENT_YEAR, f.THD_KEY_ID, f.SKU_NBR, f.SKU_DESC{extra_cols_sql},
+                   f.SUPPLIER, f.IS_SISTER_SKU_FLAG{factory_cols_sql},
+                   f.BP, f.BUY_UNITS, f.DC_NBR,
+                   f.DFC_PCT, f.DFC_UNITS, f.DFC_W1_UNITS, f.DFC_W2_UNITS,
+                   f.DFC_W3_UNITS, f.DFC_W4_UNITS,
+                   f.ITEM_CUBE, f.RACK_TYPE,
+                   f.DFC_CONTAINERS, f.DFC_CUBE
+            FROM {FINAL_ALLOCATIONS} f
+            {join_clause}
+            ORDER BY f.SKU_NBR, f.DC_NBR
         """
         df = bq().query(query).to_dataframe()
         buf = io.BytesIO()

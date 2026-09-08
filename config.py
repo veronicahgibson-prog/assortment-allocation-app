@@ -12,9 +12,16 @@ DC_MODEL_PARAMS = f"`{PROJECT_ID}.{DATASET}.OBC_LOG_SKU_DC_MODEL_PARAMS`"
 VENDOR_STRATEGY = f"`{PROJECT_ID}.{DATASET}.VENDOR_ALIGNED_STRATEGY`"
 DFC_COST_MODEL_SUBMISSION = f"`{PROJECT_ID}.{DATASET}.DFC_COST_MODEL_SUBMISSION`"
 ALLOCATION_PROC = f"`{PROJECT_ID}.{DATASET}.run_dynamic_allocation`"
+# Retired in favor of UNIFIED_ALLOCATION_PROC below — each resolved CAMP_ASMT_ID
+# live at allocation time from a stored/stale column or param instead of the
+# assortment tool's own output tables, so an edited DC selection (Move-to,
+# deselecting a DC) had no effect on the actual allocation. Left defined,
+# unreferenced, rather than dropped from BigQuery (shared warehouse).
 VENDOR_ALIGNED_PROC = f"`{PROJECT_ID}.{DATASET}.run_vendor_aligned_allocation`"
 SINGLE_DC_PROC = f"`{PROJECT_ID}.{DATASET}.run_single_dc_allocation`"
 MULTI_DC_PROC = f"`{PROJECT_ID}.{DATASET}.run_multi_dc_allocation`"
+UNIFIED_ALLOCATION_PROC = f"`{PROJECT_ID}.{DATASET}.run_allocation_unified`"
+SKU_DC_ELIGIBILITY = f"`{PROJECT_ID}.{DATASET}.OBC_CTLG_SKU_DC`"
 
 # OBC weekly cost-model pipeline (formerly three manual notebook/dashboard
 # steps — see _run_obc_pipeline in app.py): pre-processing/safety-stock,

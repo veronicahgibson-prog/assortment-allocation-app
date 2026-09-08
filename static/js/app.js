@@ -3243,6 +3243,13 @@
         }
     }
 
+    // Whatever this upload's THD key needs beyond THD_SKU_NBR (typically
+    // MVNDR_NBR) — FINAL_ALLOCATIONS_WIDE has no such column itself, so
+    // /api/results joins it in from EVENTS_SKU_LIST and reports which
+    // column(s) it added here, since that's upload-specific and can't be a
+    // fixed entry in RESULT_COLUMNS.
+    let resultsExtraKeyCols = [];
+
     async function loadResultsTable() {
         try {
             const p = new URLSearchParams();
@@ -3252,6 +3259,7 @@
             p.set("dir", resultsDir);
             const result = await api(`/api/results?${p}`);
             const total = result.total || 0;
+            resultsExtraKeyCols = result.extra_key_cols || [];
             renderResultsTable(result.data || []);
             const totalPages = Math.ceil(total / PAGE_SIZE);
             renderResultsPagination(result.has_more, result.page, totalPages, total);
@@ -3267,7 +3275,13 @@
     // to come back in a given page of results.
     const FACTORY_ONLY_COLUMNS = ["FACTORY_ID", "FACTORY_CUBE", "FACTORY_CONTAINERS"];
     function getVisibleResultColumns() {
-        return includesImports ? RESULT_COLUMNS : RESULT_COLUMNS.filter(c => !FACTORY_ONLY_COLUMNS.includes(c.key));
+        const base = includesImports ? RESULT_COLUMNS : RESULT_COLUMNS.filter(c => !FACTORY_ONLY_COLUMNS.includes(c.key));
+        if (!resultsExtraKeyCols.length) return base;
+        // Inserted right after SKU_DESC (not sortable — they come from a
+        // joined table, not FINAL_ALLOCATIONS_WIDE itself).
+        const descIdx = base.findIndex(c => c.key === "SKU_DESC");
+        const extraCols = resultsExtraKeyCols.map(key => ({ key, label: KEY_FIELD_LABELS[key] || key, sortable: false }));
+        return [...base.slice(0, descIdx + 1), ...extraCols, ...base.slice(descIdx + 1)];
     }
 
     function renderResultsTable(data) {
@@ -3278,6 +3292,14 @@
             const th = document.createElement("th");
             th.textContent = col.label;
             th.dataset.col = col.key;
+            // Extra THD-key columns (e.g. MVNDR_NBR) come from a table
+            // joined in for display only — FINAL_ALLOCATIONS_WIDE's own
+            // ALLOWED_SORT_COLS has no entry for them, so sorting by one
+            // would silently no-op server-side.
+            if (col.sortable === false) {
+                headRow.appendChild(th);
+                continue;
+            }
             if (resultsSort === col.key) th.textContent += resultsDir === "ASC" ? " ▲" : " ▼";
             th.addEventListener("click", () => {
                 if (resultsSort === col.key) resultsDir = resultsDir === "ASC" ? "DESC" : "ASC";

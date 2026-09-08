@@ -3,7 +3,8 @@
 import logging
 import time
 from google.cloud import bigquery
-from config import (VENDOR_ALIGNED_PROC, SINGLE_DC_PROC, MULTI_DC_PROC,
+from config import (UNIFIED_ALLOCATION_PROC, DFC_COST_MODEL_SUBMISSION,
+                    CATALOG_RUN_ANALYTICS, SKU_DC_ELIGIBILITY,
                     FINAL_ALLOCATIONS, CATALOG_RUN_ALT, EVENTS_SKU_LIST)
 
 logger = logging.getLogger(__name__)
@@ -16,64 +17,40 @@ MAX_RETRIES = 3
 
 
 def run_allocation(client: bigquery.Client, params: dict) -> dict:
-    """Call the appropriate allocation stored procedure based on strategy."""
+    """Call the single unified allocation stored procedure. It resolves each
+    record's CAMP_ASMT_ID live (never from a stored/stale column) — see
+    run_allocation_unified in BigQuery for the per-strategy resolution logic."""
     strategy = params["strategy"]
     event_name = params["event_name"]
     wave_count = int(params.get("wave_count", 0))
+    run_id = params.get("run_id", "")
+    sku_grp = params.get("sku_grp", "")
 
-    if strategy == "VENDOR_ALIGNED":
-        run_id = params.get("run_id", "")
-        sku_grp = params.get("sku_grp", "")
-        query = f"""
-            CALL {VENDOR_ALIGNED_PROC}(
-                @in_run_id, @in_sku_grp, @in_event_name, @in_wave_count
-            )
-        """
-        job_config = bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("in_run_id", "STRING", run_id),
-            bigquery.ScalarQueryParameter("in_sku_grp", "STRING", sku_grp),
-            bigquery.ScalarQueryParameter("in_event_name", "STRING", event_name),
-            bigquery.ScalarQueryParameter("in_wave_count", "INT64", wave_count),
-        ])
-
-    elif strategy == "SINGLE_DC":
-        run_id = params.get("run_id", "")
-        dc_counts = [int(x) for x in params.get("dc_counts", [])]
-        dc_count = dc_counts[0] if dc_counts else 0
-        query = f"""
-            CALL {SINGLE_DC_PROC}(
-                @in_run_id, @in_dc_count, @in_event_name, @in_wave_count
-            )
-        """
-        job_config = bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("in_run_id", "STRING", run_id),
-            bigquery.ScalarQueryParameter("in_dc_count", "INT64", dc_count),
-            bigquery.ScalarQueryParameter("in_event_name", "STRING", event_name),
-            bigquery.ScalarQueryParameter("in_wave_count", "INT64", wave_count),
-        ])
-
-    elif strategy == "MULTI_DC":
-        run_id = params.get("run_id", "")
-        dc_counts = [int(x) for x in params.get("dc_counts", [])]
-        is_import = bool(params.get("is_import", False))
-        # Empty dc_counts + is_import means the assortment step ran in dynamic mode
-        # (determine_multi_dc_assortment picked a DC count per factory); allocation
-        # must then pull each factory's own winner instead of one shared assortment.
-        is_dynamic_import = is_import and not dc_counts
-        query = f"""
-            CALL {MULTI_DC_PROC}(
-                @in_run_id, @in_dc_counts, @in_event_name, @in_wave_count, @in_dynamic_import
-            )
-        """
-        job_config = bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("in_run_id", "STRING", run_id),
-            bigquery.ArrayQueryParameter("in_dc_counts", "INT64", dc_counts),
-            bigquery.ScalarQueryParameter("in_event_name", "STRING", event_name),
-            bigquery.ScalarQueryParameter("in_wave_count", "INT64", wave_count),
-            bigquery.ScalarQueryParameter("in_dynamic_import", "BOOL", is_dynamic_import),
-        ])
-    else:
+    if strategy not in ("VENDOR_ALIGNED", "SINGLE_DC", "MULTI_DC"):
         return {"success": False, "error": f"Unknown strategy: {strategy}"}
+
+    dc_counts = [int(x) for x in params.get("dc_counts", [])]
+    is_import = bool(params.get("is_import", False))
+    # Empty dc_counts + is_import means the assortment step ran in dynamic mode
+    # (determine_multi_dc_assortment picked a DC count per factory); allocation
+    # must then pull each factory's own winner instead of one shared assortment.
+    is_dynamic_import = strategy == "MULTI_DC" and is_import and not dc_counts
+
+    query = f"""
+        CALL {UNIFIED_ALLOCATION_PROC}(
+            @in_run_id, @in_sku_grp, @in_event_name, @in_wave_count,
+            @in_strategy, @in_dc_counts, @in_dynamic_import
+        )
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("in_run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("in_sku_grp", "STRING", sku_grp),
+        bigquery.ScalarQueryParameter("in_event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("in_wave_count", "INT64", wave_count),
+        bigquery.ScalarQueryParameter("in_strategy", "STRING", strategy),
+        bigquery.ArrayQueryParameter("in_dc_counts", "INT64", dc_counts),
+        bigquery.ScalarQueryParameter("in_dynamic_import", "BOOL", is_dynamic_import),
+    ])
 
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -89,6 +66,134 @@ def run_allocation(client: bigquery.Client, params: dict) -> dict:
                 time.sleep(2 ** attempt)
 
     return {"success": False, "error": f"Allocation failed after {MAX_RETRIES} attempts: {last_error}"}
+
+
+def check_vendor_dc_eligibility(client: bigquery.Client, run_id: str, sku_grp: str, event_name: str) -> list[dict]:
+    """For VENDOR_ALIGNED: find SKUs whose currently-submitted DC selection
+    (DFC_COST_MODEL_SUBMISSION.dc_inclusions) has no matching CAMP_ASMT_ID in the
+    catalog run — same DC-set match the allocation procedure itself uses — then
+    explain why via OBC_CTLG_SKU_DC (VIABLE_POST=FALSE) and list eligible DCs
+    (VIABLE_POST=TRUE) the user could swap in instead. Only surfaces SKUs where a
+    match genuinely fails; not every VIABLE_POST=FALSE row blocks a match (e.g. a
+    soft "no rack type" reason can still resolve fine), so flagging every such row
+    would be a false alarm."""
+    query = f"""
+    DECLARE resolved_sku_grp STRING;
+    IF @in_sku_grp IS NOT NULL AND @in_sku_grp != '' THEN
+      SET resolved_sku_grp = @in_sku_grp;
+    ELSE
+      SET resolved_sku_grp = (
+        SELECT SKU_GRP
+        FROM {CATALOG_RUN_ANALYTICS}
+        WHERE RUN_ID = @in_run_id
+          AND REGEXP_REPLACE(UPPER(SKU_GRP), r'[^A-Z0-9]', '')
+              LIKE CONCAT('%', REGEXP_REPLACE(UPPER(@in_event_name), r'[^A-Z0-9]', ''), '%')
+        LIMIT 1
+      );
+    END IF;
+
+    WITH SUBMISSION AS (
+      SELECT
+        sku_nbr,
+        SAFE_CAST(target_dc_count AS INT64) AS TARGET_DC_COUNT,
+        ARRAY(SELECT CAST(TRIM(d) AS INT64) FROM UNNEST(SPLIT(dc_inclusions, ',')) d) AS CHOSEN_DCS,
+        ARRAY_TO_STRING(ARRAY(
+          SELECT CAST(CAST(TRIM(d) AS INT64) AS STRING)
+          FROM UNNEST(SPLIT(dc_inclusions, ',')) d ORDER BY 1
+        ), ',') AS TARGET_DC_SET
+      FROM {DFC_COST_MODEL_SUBMISSION}
+      -- Matched on key = in_sku_grp directly: the real assortment-tool pipeline
+      -- publishes SKU_GRP as exactly this submission's own key (LDAP-project-project),
+      -- so no separate event_year lookup (ambiguous when EVENTS_SKU_LIST holds more
+      -- than one year for the same EVENT_NAME) or project_name reconstruction is
+      -- needed at all.
+      WHERE key = resolved_sku_grp
+        AND dc_inclusions IS NOT NULL
+    ),
+    CAMP_LOOKUP AS (
+      SELECT SKU_NBR, DC_COUNT,
+        ARRAY_TO_STRING(ARRAY(
+          SELECT CAST(CAST(TRIM(d) AS INT64) AS STRING)
+          FROM UNNEST(SPLIT(DC_LIST, '-')) d ORDER BY 1
+        ), ',') AS DC_SET
+      FROM {CATALOG_RUN_ANALYTICS}
+      WHERE RUN_ID = @in_run_id AND SKU_GRP = resolved_sku_grp
+    ),
+    UNMATCHED AS (
+      SELECT s.sku_nbr, ANY_VALUE(s.CHOSEN_DCS) AS CHOSEN_DCS
+      FROM SUBMISSION s
+      LEFT JOIN CAMP_LOOKUP c
+        ON c.SKU_NBR = CAST(s.sku_nbr AS INT64)
+       AND c.DC_COUNT = s.TARGET_DC_COUNT
+       AND c.DC_SET   = s.TARGET_DC_SET
+      GROUP BY s.sku_nbr
+      HAVING COUNTIF(c.DC_SET IS NOT NULL) = 0
+    )
+    SELECT
+      u.sku_nbr, ANY_VALUE(E.SKU_DESC) AS SKU_DESC, ANY_VALUE(E.SUPPLIER) AS SUPPLIER,
+      ANY_VALUE(u.CHOSEN_DCS) AS CHOSEN_DCS,
+      ARRAY_AGG(DISTINCT E.THD_SKU_NBR IGNORE NULLS) AS THD_SKU_NBRS
+    FROM UNMATCHED u
+    LEFT JOIN {EVENTS_SKU_LIST} E
+      ON SAFE_CAST(E.SKU_NBR AS INT64) = CAST(u.sku_nbr AS INT64)
+     AND UPPER(E.EVENT_NAME) = UPPER(@in_event_name)
+    GROUP BY u.sku_nbr
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("in_run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("in_sku_grp", "STRING", sku_grp),
+        bigquery.ScalarQueryParameter("in_event_name", "STRING", event_name),
+    ])
+    unmatched_rows = list(client.query(query, job_config=job_config).result())
+    if not unmatched_rows:
+        return []
+
+    sku_nbrs = [int(r["sku_nbr"]) for r in unmatched_rows]
+    chosen_by_sku = {int(r["sku_nbr"]): list(r["CHOSEN_DCS"]) for r in unmatched_rows}
+
+    # A plain JOIN restricted to just these flagged SKUs (never a per-row correlated
+    # subquery against OBC_CTLG_SKU_DC) — cheap since unmatched_rows is only the handful
+    # of real exceptions, not every SKU in the event.
+    elig_query = f"""
+        SELECT SKU_NBR, CAST(DC_NBR AS INT64) AS DC_NBR, VIABLE_POST, EXCL_REASON
+        FROM {SKU_DC_ELIGIBILITY}
+        WHERE RUN_ID = @in_run_id AND SKU_NBR IN UNNEST(@sku_nbrs)
+    """
+    elig_jc = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("in_run_id", "STRING", run_id),
+        bigquery.ArrayQueryParameter("sku_nbrs", "INT64", sku_nbrs),
+    ])
+    elig_rows = list(client.query(elig_query, job_config=elig_jc).result())
+
+    ineligible_by_sku = {}
+    eligible_by_sku = {}
+    for r in elig_rows:
+        sku = r["SKU_NBR"]
+        if r["VIABLE_POST"] is False:
+            ineligible_by_sku.setdefault(sku, []).append({"dc_nbr": r["DC_NBR"], "reason": r["EXCL_REASON"]})
+        elif r["VIABLE_POST"] is True:
+            eligible_by_sku.setdefault(sku, []).append(r["DC_NBR"])
+
+    return [
+        {
+            "sku_nbr": r["sku_nbr"],
+            "sku_desc": r["SKU_DESC"],
+            "supplier": r["SUPPLIER"],
+            # A proxy SKU_NBR can carry more than one THD_SKU_NBR (e.g. two vendor-aligned
+            # sourcing paths sharing a proxy) — the override fix must apply to all of them.
+            "thd_sku_nbrs": list(r["THD_SKU_NBRS"]),
+            "chosen_dcs": chosen_by_sku[int(r["sku_nbr"])],
+            "ineligible": [
+                i for i in ineligible_by_sku.get(int(r["sku_nbr"]), [])
+                if i["dc_nbr"] in chosen_by_sku[int(r["sku_nbr"])]
+            ],
+            "eligible_alternatives": [
+                dc for dc in eligible_by_sku.get(int(r["sku_nbr"]), [])
+                if dc not in chosen_by_sku[int(r["sku_nbr"])]
+            ],
+        }
+        for r in unmatched_rows
+    ]
 
 
 def fetch_available_dc_counts(client: bigquery.Client, run_id: str, sku_grp: str) -> dict:
@@ -127,8 +232,15 @@ def is_import_run(client: bigquery.Client) -> bool:
 
 
 def fetch_results(client: bigquery.Client, page: int = 1, page_size: int = 50,
-                  sort: str = "SKU_NBR", direction: str = "ASC") -> dict:
-    """Fetch allocation results from FINAL_ALLOCATIONS_WIDE."""
+                  sort: str = "SKU_NBR", direction: str = "ASC", extra_key_cols=None) -> dict:
+    """Fetch allocation results from FINAL_ALLOCATIONS_WIDE.
+
+    extra_key_cols: optional list of (alias, events_sku_list_column) pairs —
+    whatever this upload's THD key needs beyond THD_SKU_NBR (typically
+    MVNDR_NBR) to distinguish two records, joined in from EVENTS_SKU_LIST via
+    the THD_KEY_ID both tables share. FINAL_ALLOCATIONS_WIDE has no
+    SISTER_SKU_NBR/MVNDR_NBR itself (its SKU_NBR is THD_SKU_NBR published
+    under a different name), so this is the only way to surface them here."""
     # Matches the actual FINAL_ALLOCATIONS_WIDE schema (run_multi_dc_allocation.sql's
     # final SELECT) — THD_SKU_NBR is published as SKU_NBR, and there is no
     # SISTER_SKU_NBR/MVNDR_NBR/OG_W*_UNITS/DFC_W5_UNITS in that table at all.
@@ -148,18 +260,26 @@ def fetch_results(client: bigquery.Client, page: int = 1, page_size: int = 50,
     count_q = f"SELECT COUNT(*) AS cnt FROM {FINAL_ALLOCATIONS}"
     total = list(client.query(count_q).result())[0]["cnt"]
 
-    factory_totals = "FACTORY_CUBE, FACTORY_CONTAINERS" if is_import_run(client) else \
+    extra_key_cols = extra_key_cols or []
+    extra_cols_sql = "".join(f", e.{sql_col} AS {alias}" for alias, sql_col in extra_key_cols)
+    join_clause = (
+        f"LEFT JOIN {EVENTS_SKU_LIST} e "
+        f"ON e.THD_KEY_ID = f.THD_KEY_ID AND e.EVENT_NAME = f.EVENT_NAME AND e.EVENT_YEAR = f.EVENT_YEAR"
+    ) if extra_key_cols else ""
+
+    factory_totals = "f.FACTORY_CUBE, f.FACTORY_CONTAINERS" if is_import_run(client) else \
         "CAST(NULL AS FLOAT64) AS FACTORY_CUBE, CAST(NULL AS FLOAT64) AS FACTORY_CONTAINERS"
     query = f"""
-        SELECT SKU_NBR, SKU_DESC,
-               SUPPLIER, FACTORY_ID,
-               BP, BUY_UNITS,
-               DC_NBR,
-               DFC_PCT, DFC_UNITS, DFC_W1_UNITS, DFC_W2_UNITS,
-               DFC_W3_UNITS, DFC_W4_UNITS,
-               ITEM_CUBE, RACK_TYPE, {factory_totals}
-        FROM {FINAL_ALLOCATIONS}
-        ORDER BY {sort} {direction}
+        SELECT f.SKU_NBR, f.SKU_DESC{extra_cols_sql},
+               f.SUPPLIER, f.FACTORY_ID,
+               f.BP, f.BUY_UNITS,
+               f.DC_NBR,
+               f.DFC_PCT, f.DFC_UNITS, f.DFC_W1_UNITS, f.DFC_W2_UNITS,
+               f.DFC_W3_UNITS, f.DFC_W4_UNITS,
+               f.ITEM_CUBE, f.RACK_TYPE, {factory_totals}
+        FROM {FINAL_ALLOCATIONS} f
+        {join_clause}
+        ORDER BY f.{sort} {direction}
         LIMIT @limit OFFSET @offset
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
@@ -171,7 +291,10 @@ def fetch_results(client: bigquery.Client, page: int = 1, page_size: int = 50,
     if has_more:
         rows = rows[:page_size]
 
-    return {"data": rows, "page": page, "has_more": has_more, "total": total}
+    return {
+        "data": rows, "page": page, "has_more": has_more, "total": total,
+        "extra_key_cols": [alias for alias, _ in extra_key_cols],
+    }
 
 
 def fetch_summary(client: bigquery.Client) -> dict:
