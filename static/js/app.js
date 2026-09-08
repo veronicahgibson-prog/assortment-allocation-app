@@ -1816,8 +1816,8 @@
             const defaultDcs = parseVendorDcs(match.DC_LIST);
             let html = `<table class="detail-table vendor-sku-table"><thead><tr>
                 <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
-            result.rows.forEach(row => {
-                const selectedDcs = vendorSkuDcs(match, row);
+            pageRows.forEach(({ row, owner }) => {
+                const selectedDcs = vendorSkuDcs(owner.match, row);
                 html += `<tr data-sku-key="${row.THD_SKU_NBR}"><td><div class="vendor-dc-buttons">
                     ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
