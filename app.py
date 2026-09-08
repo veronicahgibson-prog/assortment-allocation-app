@@ -1416,6 +1416,7 @@ def api_submit_cost_model():
     body = request.get_json(silent=True) or {}
     event_name = body.get("event_name", "")
     vendor_matches = body.get("vendor_matches") or []
+    logger.info(f"submit_cost_model: event_name={event_name!r} vendor_matches_count={len(vendor_matches)}")
     if not event_name:
         return jsonify({"error": "event_name is required"}), 400
 
