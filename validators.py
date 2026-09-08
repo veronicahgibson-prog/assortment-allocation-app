@@ -331,7 +331,7 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
                 df["EVENT_YEAR"] = str(int(float(step1_event_year)))
     checks.append({
         "id": 7,
-        "name": "Matches event selected in Step 1",
+        "name": "EVENT_NAME matches selected event in Step 1",
         "passed": True,
         "detail": "Corrected to Step 1's selection" if step1_mismatch
             else ("Matches Step 1 selection" if step1_is_existing_event and step1_event_name else "N/A — new event"),
