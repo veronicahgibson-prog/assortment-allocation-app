@@ -1547,6 +1547,103 @@ def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vend
     return out
 
 
+@app.route("/api/download_vendor_aligned_table", methods=["POST"])
+def download_vendor_aligned_table():
+    """Export every SKU record across all matched suppliers with its
+    effective DC assignment — the same override resolution
+    /api/submit_cost_model uses (per-SKU overrides, "Move to" merges) — kept
+    at THD-record granularity (not rolled up by SKU_NBR) so SISTER_SKU_NBR/
+    SKU_DESC and whatever else distinguishes two records sharing a
+    THD_SKU_NBR (e.g. MVNDR_NBR) stay visible."""
+    body = request.get_json(silent=True) or {}
+    event_name = body.get("event_name", "")
+    vendor_matches = body.get("vendor_matches") or []
+    if not event_name:
+        return jsonify({"error": "event_name is required"}), 400
+
+    try:
+        year_q = f"SELECT DISTINCT EVENT_YEAR FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev LIMIT 1"
+        jc = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("ev", "STRING", event_name),
+        ])
+        year_rows = list(bq().query(year_q, job_config=jc).result())
+        if not year_rows:
+            return jsonify({"error": f"No rows found for event '{event_name}'"}), 400
+        event_year = year_rows[0].EVENT_YEAR
+
+        upload_df = _upload_cache.get("df")
+        key_cols = _determine_thd_key(upload_df, _upload_cache.get("includes_imports", False)) if upload_df is not None else ["THD_SKU_NBR"]
+        base_cols = {"THD_SKU_NBR", "SISTER_SKU_NBR", "SKU_DESC", "SUPPLIER"}
+        extra_key_cols = [c for c in key_cols if c not in base_cols]
+        sql_cols = [f"{_THD_KEY_COL_TO_EVENTS_SKU_LIST.get(c, c)} AS {c}" for c in extra_key_cols]
+
+        rows = list(bq().query(f"""
+            SELECT THD_SKU_NBR, SISTER_SKU_NBR, SKU_DESC, SUPPLIER{"".join(f", {c}" for c in sql_cols)}
+            FROM {EVENTS_SKU_LIST}
+            WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+            ORDER BY THD_SKU_NBR
+        """, job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+            bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+        ])).result())
+
+        default_dcs_by_supplier = {}
+        overrides_by_key = {}
+        for m in vendor_matches:
+            supplier = (m.get("SUPPLIER") or "").strip()
+            if supplier:
+                default_dcs_by_supplier[supplier] = _parse_dc_list(m.get("DC_LIST"))
+            for thd_key, dcs in (m.get("SKU_OVERRIDES") or {}).items():
+                try:
+                    overrides_by_key[str(thd_key)] = sorted({int(d) for d in dcs})
+                except (TypeError, ValueError):
+                    continue
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Vendor-Aligned SKUs"
+        header_font = Font(bold=True, color="FFFFFF", size=10)
+        header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
+        thin_border = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"), bottom=Side(style="thin"),
+        )
+        headers = ["THD_SKU_NBR", "SISTER_SKU_NBR", "SKU_DESC", *extra_key_cols, "SUPPLIER", "DC_COUNT", "DC_LIST", "DC_NM_LIST"]
+        for c_idx, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=c_idx, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.border = thin_border
+            ws.column_dimensions[cell.column_letter].width = max(len(h) + 4, 12)
+
+        r_idx = 2
+        for r in rows:
+            thd_key = "|".join("__NULL__" if getattr(r, c) is None else str(getattr(r, c)) for c in key_cols)
+            dc_list = overrides_by_key.get(thd_key) or default_dcs_by_supplier.get((r.SUPPLIER or "").strip())
+            dc_list_sorted = sorted(dc_list) if dc_list else []
+            dc_list_str = "-".join(str(d) for d in dc_list_sorted)
+            dc_nm_list_str = "-".join(_dc_display_name(d) for d in dc_list_sorted)
+            row_values = [r.THD_SKU_NBR, r.SISTER_SKU_NBR, r.SKU_DESC] \
+                + [getattr(r, c) for c in extra_key_cols] \
+                + [r.SUPPLIER, len(dc_list_sorted) or None, dc_list_str or None, dc_nm_list_str or None]
+            for c_idx, val in enumerate(row_values, 1):
+                cell = ws.cell(row=r_idx, column=c_idx, value=val)
+                cell.border = thin_border
+            r_idx += 1
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return send_file(
+            buf, as_attachment=True,
+            download_name=f"vendor_aligned_skus_{re.sub(r'[^A-Za-z0-9]+', '_', event_name)}.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    except Exception as e:
+        logger.exception("download_vendor_aligned_table error")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/submit_cost_model", methods=["POST"])
 def api_submit_cost_model():
     """Insert per-SKU rows into DFC_COST_MODEL_SUBMISSION from EVENTS_SKU_LIST.

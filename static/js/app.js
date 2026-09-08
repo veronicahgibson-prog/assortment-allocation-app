@@ -1089,6 +1089,7 @@
     // outbound cost needs to run), so this just starts it and checks back
     // periodically rather than blocking on it.
     let obcPollTimer = null;
+    let autoEligibilityCheckedForRun = null;
 
     function renderObcPipelineStatus(state) {
         const el = $("#asmtToolStatus");
@@ -1111,6 +1112,18 @@
             el.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> Assortment tool complete${runLine}.
             </div>`;
+            // Auto-populate Run ID and check DC eligibility right away for VENDOR_ALIGNED —
+            // as early as this can possibly be known (OBC_CTLG_SKU_DC/CATALOG_RUN_ANALYTICS
+            // are both keyed by RUN_ID, which doesn't exist before this run finishes) —
+            // rather than waiting for a full allocation run to surface conflicts in
+            // UNALLOCATED_RECORDS. Guarded so it only fires once per new run_id.
+            const isVendorAligned = document.querySelector('input[name="strategy"][value="VENDOR_ALIGNED"]')?.checked;
+            if (state.run_id && state.run_id !== autoEligibilityCheckedForRun && isVendorAligned) {
+                autoEligibilityCheckedForRun = state.run_id;
+                const runIdInput = $("#stratRunId");
+                if (runIdInput && !runIdInput.value.trim()) runIdInput.value = state.run_id;
+                loadDcEligibility();
+            }
         } else if (state.status === "error") {
             el.style.display = "block";
             el.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
@@ -1893,6 +1906,17 @@
         const initialDcs = parseVendorDcs(match._initialDcList);
         const initialNames = parseVendorNames(match._initialDcNames);
         match.DC_NM_LIST = next.map(dc => vendorDcName(dc, initialNames, initialDcs.indexOf(dc))).join(", ");
+        // A vendor merged into this one (via "Move to...") got a one-time
+        // copy of this DC list at move time, not a live reference — without
+        // this cascade, toggling a DC here afterward would leave the merged
+        // vendor's own SKUs still showing/using the pre-toggle list.
+        vendorMatches.forEach(v => {
+            if (v._movedTo === matchIndex) {
+                v.DC_LIST = match.DC_LIST;
+                v.DC_COUNT = match.DC_COUNT;
+                v.DC_NM_LIST = match.DC_NM_LIST;
+            }
+        });
         renderVendorSupplierSummary(vendorMatches);
     }
 
@@ -1919,10 +1943,19 @@
         renderVendorSupplierSummary(vendorMatches);
     }
 
+    // Guards against an older, slower-to-resolve reload overwriting a newer
+    // one's correct render with stale content — e.g. a supplier-level DC
+    // toggle re-triggers this for an already-expanded panel while a prior
+    // call (from opening it, or an earlier toggle) is still in flight; if
+    // that older call's fetch happens to resolve later, it must not clobber
+    // the fresher render with the DC list as it stood before the toggle.
+    let vendorSkuLoadToken = {};
+
     async function loadVendorSkuRows(matchIndex, page) {
         const match = vendorMatches[matchIndex];
         const container = $(`#vendor-skus-${matchIndex}`);
         if (!match || !container) return;
+        const myToken = (vendorSkuLoadToken[matchIndex] = (vendorSkuLoadToken[matchIndex] || 0) + 1);
         container.innerHTML = '<div class="vendor-sku-loading">Loading SKU details...</div>';
         try {
             // A vendor merged into this one (via "Move to...") still owns its
@@ -1940,6 +1973,7 @@
             const fetches = await Promise.all(owners.map(o =>
                 api(`/api/vendor_skus?supplier=${encodeURIComponent(o.match.SUPPLIER)}&page=1&page_size=${FETCH_PAGE_SIZE}`)
             ));
+            if (vendorSkuLoadToken[matchIndex] !== myToken) return; // superseded by a newer reload
             fetches.forEach(r => { if (r.error) throw new Error(r.error); });
             const truncated = fetches.some(r => (r.pages || 1) > 1);
             const allRows = [];
@@ -1958,14 +1992,21 @@
             const clampedPage = Math.min(Math.max(page, 1), totalPages);
             const pageRows = allRows.slice((clampedPage - 1) * DISPLAY_PAGE_SIZE, clampedPage * DISPLAY_PAGE_SIZE);
 
-            const defaultDcs = parseVendorDcs(match.DC_LIST);
             let html = `<table class="detail-table vendor-sku-table"><thead><tr>
                 <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th>${extraHeaders}<th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
             pageRows.forEach(({ row, owner }) => {
+                // Eligible (which pills render at all) and selected (which
+                // are active) must come from the SAME DC list — the row's
+                // actual owner, not always the top-level group. A vendor
+                // merged in via "Move to" keeps its own DC_LIST distinct
+                // from the group's, so using the group's here for a merged-
+                // in owner's row would show pills that don't match what's
+                // actually selectable/selected for it.
+                const defaultDcs = parseVendorDcs(owner.match.DC_LIST);
                 const selectedDcs = vendorSkuDcs(owner.match, row);
                 const extraCells = extraKeyCols.map(f => `<td>${row[f] || "—"}</td>`).join("");
                 html += `<tr data-sku-key="${row.THD_KEY}"><td><div class="vendor-dc-buttons">
-                    ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(match._initialDcNames), selectedDcs, {
+                    ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(owner.match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
                         dataAttrs: ` data-sku-key="${row.THD_KEY}" data-owner-index="${owner.index}"`,
                     })}
@@ -2093,8 +2134,11 @@
         const row = container.querySelector(`tr[data-sku-key="${CSS.escape(String(skuKey))}"]`);
         if (!row) return;
 
-        const defaultDcs = parseVendorDcs(group.DC_LIST);
-        const names = parseVendorNames(group._initialDcNames);
+        // Eligible and selected must come from the same DC list — the row's
+        // actual owner, not the top-level group (a vendor merged in via
+        // "Move to" keeps its own DC_LIST distinct from the group's).
+        const defaultDcs = parseVendorDcs(owner.DC_LIST);
+        const names = parseVendorNames(owner._initialDcNames);
         const selectedDcs = parseVendorDcs(owner.SKU_OVERRIDES[skuKey] || owner.DC_LIST);
 
         const btnCell = row.querySelector(".vendor-dc-buttons");
@@ -2194,8 +2238,10 @@
             })
             .filter(Boolean);
 
-        let html = `<h4 style="margin:0 0 6px 0;font-size:.9rem">
-            <i class="fas fa-boxes-stacked"></i> Supplier DC Assignments</h4>`;
+        let html = `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px">
+            <h4 style="margin:0;font-size:.9rem"><i class="fas fa-boxes-stacked"></i> Supplier DC Assignments</h4>
+            <button type="button" class="btn btn-sm btn-secondary vendor-table-download-btn"><i class="fas fa-file-arrow-down"></i> Download</button>
+        </div>`;
         if (priorRows.length) {
             // A standalone high-level comparison, separate from the table
             // below — this year's vendor roster against last year's, not just
@@ -2320,7 +2366,39 @@
         box.querySelectorAll(".vendor-undo-move-btn").forEach(button => {
             button.addEventListener("click", () => undoVendorMove(Number(button.dataset.matchIndex)));
         });
+        box.querySelector(".vendor-table-download-btn")?.addEventListener("click", downloadVendorAlignedTable);
         vendorSkuExpanded.forEach(matchIndex => loadVendorSkuRows(matchIndex, 1));
+    }
+
+    // Exports every SKU record across all matched suppliers with its
+    // effective DC assignment — the same override resolution
+    // /api/submit_cost_model uses (per-SKU overrides, "Move to" merges),
+    // kept at THD-record granularity rather than rolled up by SKU_NBR, so
+    // SISTER_SKU_NBR/SKU_DESC and whatever else distinguishes two records
+    // sharing a THD_SKU_NBR (e.g. MVNDR_NBR) stay visible.
+    async function downloadVendorAlignedTable() {
+        showLoading("Preparing vendor-aligned SKU export…");
+        try {
+            const resp = await fetch("/api/download_vendor_aligned_table", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ event_name: eventName, vendor_matches: vendorMatches }),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                throw new Error(err.error || `Server returned status ${resp.status}`);
+            }
+            const blob = await resp.blob();
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = `vendor_aligned_skus_${(eventName || "export").replace(/\s+/g, "_")}.xlsx`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+        } catch (e) {
+            toast("Failed to download vendor-aligned table: " + e.message, "error");
+        } finally {
+            hideLoading();
+        }
     }
 
     let availableDcOptions = [];
