@@ -296,9 +296,12 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
     # picked an *existing* event from the dropdown there (a brand-new event
     # has nothing to compare against, and shouldn't be flagged just because
     # the file's own EVENT_NAME differs from unrelated free text typed in).
-    # A warning, not a hard error — the file's own EVENT_NAME/EVENT_YEAR are
-    # what actually get inserted, so a mismatch is worth surfacing but never
-    # blocks the upload from proceeding if the user means to go ahead anyway.
+    # A warning, not a hard error: Step 1's selection is corrected onto the
+    # file in place (below) rather than just flagged, since that's the
+    # identity everything downstream (insert, cost model, assortment,
+    # allocation) keys off — same treatment as the BUY_UNITS/WAVE rounding
+    # above, which also mutates df in place instead of leaving the raw value
+    # to flow through mismatched.
     step1_mismatch = []
     if step1_is_existing_event and step1_event_name:
         file_event_name = ""
@@ -320,13 +323,17 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
             file_label = f"{file_event_name or '—'} {file_event_year if file_event_year is not None else '—'}".strip()
             step1_mismatch.append({
                 "row": "—", "column": "EVENT_NAME/EVENT_YEAR", "row_data": {},
-                "message": f"Step 1: {step1_label}  —  File: {file_label}",
+                "message": f"Corrected to Step 1's selection — Step 1: {step1_label}  —  File had: {file_label}",
             })
+            if name_mismatch and "EVENT_NAME" in df.columns:
+                df["EVENT_NAME"] = step1_event_name.strip().upper()
+            if year_mismatch and "EVENT_YEAR" in df.columns:
+                df["EVENT_YEAR"] = str(int(float(step1_event_year)))
     checks.append({
         "id": 7,
         "name": "Matches event selected in Step 1",
         "passed": True,
-        "detail": "Mismatch found — you can still proceed if this is intentional" if step1_mismatch
+        "detail": "Corrected to Step 1's selection" if step1_mismatch
             else ("Matches Step 1 selection" if step1_is_existing_event and step1_event_name else "N/A — new event"),
         "warning": len(step1_mismatch) > 0,
         "details": step1_mismatch,

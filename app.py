@@ -274,7 +274,7 @@ def upload_file():
 
     # Cached regardless of pass/fail so a failed (or warning-carrying) upload
     # can still be downloaded back out annotated — see
-    # /api/download_annotated_upload. Separate from the "df"/"event_name"
+    # /api/download_validated_upload. Separate from the "df"/"event_name"
     # keys below, which the rest of the app treats as "the last upload that
     # actually passed and is ready to insert" — a failed attempt must never
     # leak into that.
@@ -331,14 +331,16 @@ def upload_file():
     return jsonify(result)
 
 
-@app.route("/api/download_annotated_upload")
-def download_annotated_upload():
-    """Re-export the most recently uploaded file (pass or fail) with failed
-    rows highlighted light red, rows the validator adjusted (BUY_UNITS/WAVE
-    rounded up to a BP multiple) highlighted yellow, and both pulled to the
-    top — failed rows first, then adjusted rows, then everything else — so
-    the user can find what needs fixing without hunting through the whole
-    file."""
+@app.route("/api/download_validated_upload")
+def download_validated_upload():
+    """Re-export the most recently uploaded file (pass or fail) with
+    validate_upload()'s corrections actually applied — EVENT_NAME/EVENT_YEAR
+    corrected to Step 1's selection, BUY_UNITS/WAVE rounded to a BP multiple —
+    the same values that get inserted into EVENTS_SKU_LIST and carried into
+    assortment/allocation, not the raw upload. Failed rows are highlighted
+    light red, corrected rows yellow, and both are pulled to the top — failed
+    first, then corrected, then everything else — so the user can find what
+    needs attention without hunting through the whole file."""
     df = _upload_cache.get("last_raw_df")
     if df is None:
         return jsonify({"error": "No upload to annotate — upload a file first."}), 400
@@ -393,7 +395,7 @@ def download_annotated_upload():
     wb.save(buf)
     buf.seek(0)
     return send_file(
-        buf, as_attachment=True, download_name="sku_list_annotated.xlsx",
+        buf, as_attachment=True, download_name="sku_list_validated.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 

@@ -241,11 +241,12 @@
                 <div id="checksList"></div>
 
                 <!-- Shown whenever there are failed and/or adjusted rows to review —
-                     re-exports the upload with failed rows highlighted red, adjusted
-                     rows (BUY_UNITS/WAVE rounded to a BP multiple) highlighted yellow,
-                     both pulled to the top in that order. -->
-                <button class="btn btn-sm btn-secondary" id="btnDownloadAnnotatedUpload" style="display:none;margin-top:10px">
-                    <i class="fas fa-file-arrow-down"></i> Download Annotated File
+                     re-exports the upload with the corrections actually applied
+                     (EVENT_NAME/EVENT_YEAR, BUY_UNITS/WAVE rounding), failed rows
+                     highlighted light red, corrected rows highlighted yellow, both
+                     pulled to the top in that order. -->
+                <button class="btn btn-sm btn-secondary" id="btnDownloadValidatedUpload" style="display:none;margin-top:10px">
+                    <i class="fas fa-file-arrow-down"></i> Download Validated File
                 </button>
 
                 <!-- Errors -->
@@ -660,6 +661,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=319"></script>
+    <script src="/static/js/app.js?v=320"></script>
 </body>
 </html>

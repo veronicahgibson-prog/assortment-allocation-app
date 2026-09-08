@@ -504,8 +504,8 @@
         fileInput.addEventListener("change", () => {
             if (fileInput.files.length) handleFile(fileInput.files[0]);
         });
-        $("#btnDownloadAnnotatedUpload")?.addEventListener("click", () => {
-            window.location.href = "/api/download_annotated_upload";
+        $("#btnDownloadValidatedUpload")?.addEventListener("click", () => {
+            window.location.href = "/api/download_validated_upload";
         });
     }
 
@@ -588,10 +588,10 @@
 
         // Available whenever there's something worth reviewing row-by-row —
         // failed rows to fix, or rows the validator silently adjusted.
-        const downloadAnnotatedBtn = $("#btnDownloadAnnotatedUpload");
-        if (downloadAnnotatedBtn) {
+        const downloadValidatedBtn = $("#btnDownloadValidatedUpload");
+        if (downloadValidatedBtn) {
             const hasIssues = (result.errors?.length || 0) > 0 || (result.warnings?.length || 0) > 0;
-            downloadAnnotatedBtn.style.display = hasIssues ? "inline-flex" : "none";
+            downloadValidatedBtn.style.display = hasIssues ? "inline-flex" : "none";
         }
 
         // Checks list
