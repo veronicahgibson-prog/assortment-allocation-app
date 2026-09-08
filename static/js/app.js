@@ -792,8 +792,10 @@
                     if (!confirmed) return;
                 }
             } else if (!dataInserted) {
-                const inserted = await doInsert(false);
-                if (!inserted) return;
+                // Holding off on the EVENTS_SKU_LIST write for now — commented
+                // out on purpose, not deleted.
+                // const inserted = await doInsert(false);
+                // if (!inserted) return;
             }
             goStep(6);
         });
@@ -805,10 +807,12 @@
     // Strategies" button and by Step 2's Next button when the user proceeds
     // without clicking Confirm themselves. Returns whether it succeeded.
     async function confirmVendorStrategy() {
-        if (!dataInserted) {
-            const inserted = await doInsert(false);
-            if (!inserted) return false;
-        }
+        // Holding off on the EVENTS_SKU_LIST write for now — commented out
+        // on purpose, not deleted.
+        // if (!dataInserted) {
+        //     const inserted = await doInsert(false);
+        //     if (!inserted) return false;
+        // }
         const submitted = await submitCostModel();
         if (!submitted) return false;
         vendorStrategyConfirmed = true;
@@ -870,6 +874,7 @@
     async function loadCostModelPreview() {
         if (!eventName) return;
         try {
+            await ensureVendorMatchesFresh();
             // vendorMatches makes this a true preview of the row set
             // /api/submit_cost_model would actually insert into
             // DFC_COST_MODEL_SUBMISSION (target_dc_count/dc_inclusions/
@@ -959,7 +964,7 @@
     function setupAsmtTool() {
         $("#btnSubmitCostModel")?.addEventListener("click", submitCostModel);
         $("#btnDownloadCostModel")?.addEventListener("click", downloadCostModelCsv);
-        $("#btnDeleteCostModel")?.addEventListener("click", deleteCostModelSubmission);
+        $("#btnDeleteCostModel")?.addEventListener("click", () => deleteCostModelSubmission());
         $("#btnRunAsmtTool")?.addEventListener("click", () => {
             window.open("https://dashboard-edw.homedepot.com/workflow/jobDetail?id=1d262d53-4868-41e3-90d2-f67d08d45f29", "_blank");
             $("#btnGoStrategyFromTool").disabled = false;
@@ -973,6 +978,11 @@
     async function submitCostModel() {
         showLoading("Submitting to DFC Cost Model…");
         try {
+            // matchVendorStrategy() shows/hides its own loading state when it
+            // actually has to run — restore ours afterward so the overlay
+            // doesn't drop out from under the submit that's still pending.
+            await ensureVendorMatchesFresh();
+            showLoading("Submitting to DFC Cost Model…");
             const resp = await fetch("/api/submit_cost_model", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -986,18 +996,27 @@
             const result = await resp.json();
             if (!resp.ok || result.error) throw new Error(result.error || "Submission failed");
 
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+            const passBadge = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> ${result.message}
             </div>`;
+            $("#costModelStatus").innerHTML = passBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = true;
+            $("#btnDeleteVendorCostModel").style.display = "none";
             $("#btnRunAsmtTool").style.display = "inline-flex";
             $("#btnRunAsmtTool").disabled = false;
             toast("Cost model submission complete", "success");
             return true;
         } catch (e) {
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
+            const failBadge = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
                 <i class="fas fa-times-circle"></i> ${e.message}
             </div>`;
+            $("#costModelStatus").innerHTML = failBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
+            // Surface the delete option inline wherever this error happened,
+            // so the user isn't forced to hunt for it in a different step.
+            const alreadySubmitted = /already been submitted/i.test(e.message);
+            $("#btnDeleteVendorCostModel").style.display = alreadySubmitted ? "inline-flex" : "none";
             toast("Submission failed: " + e.message, "error");
             return false;
         } finally {
@@ -1005,9 +1024,12 @@
         }
     }
 
-    async function deleteCostModelSubmission() {
-        if (!eventName) { toast("No event loaded", "error"); return; }
-        if (!confirm(`Delete all previous cost model submissions for "${eventName}"?`)) return;
+    // `silent` skips this function's own confirm dialog and success toast —
+    // used by replacePreviousUpload(), which already confirmed with the user
+    // and reports its own toast once the resubmit that follows also succeeds.
+    async function deleteCostModelSubmission(silent = false) {
+        if (!eventName) { toast("No event loaded", "error"); return false; }
+        if (!silent && !confirm(`Delete all previous cost model submissions for "${eventName}"?`)) return false;
         showLoading("Deleting previous submission…");
         try {
             const resp = await fetch("/api/delete_cost_model", {
@@ -1017,18 +1039,50 @@
             });
             const result = await resp.json();
             if (!resp.ok || result.error) throw new Error(result.error || "Delete failed");
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+            const passBadge = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> ${result.message}
             </div>`;
+            $("#costModelStatus").innerHTML = passBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = false;
-            toast("Previous submission deleted", "success");
+            $("#btnDeleteVendorCostModel").style.display = "none";
+            // Let the user resubmit through the vendor-aligned confirm flow too.
+            vendorStrategyConfirmed = false;
+            if ($("#btnConfirmVendorStrategy")) {
+                $("#btnConfirmVendorStrategy").disabled = false;
+                $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check"></i> Confirm Vendor Strategies';
+            }
+            if (!silent) toast("Previous submission deleted", "success");
+            return true;
         } catch (e) {
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
+            const failBadge = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
                 <i class="fas fa-times-circle"></i> ${e.message}
             </div>`;
+            $("#costModelStatus").innerHTML = failBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
             toast("Delete failed: " + e.message, "error");
+            return false;
         } finally {
             hideLoading();
+        }
+    }
+
+    // Full "Replace Previous Upload" action for the vendor-aligned flow:
+    // deletes the prior DFC_COST_MODEL_SUBMISSION rows for this event and
+    // immediately resubmits the current upload in their place, so the
+    // replacement is complete in one click rather than deferring the
+    // resubmit to whenever the user next hits Confirm/Next.
+    async function replacePreviousUpload() {
+        if (!eventName) { toast("No event loaded", "error"); return; }
+        if (!confirm(`Delete the previous cost model submission for "${eventName}" and upload the current data in its place?`)) return;
+        const deleted = await deleteCostModelSubmission(true);
+        if (!deleted) return;
+        const submitted = await submitCostModel();
+        if (submitted) {
+            vendorStrategyConfirmed = true;
+            $("#btnConfirmVendorStrategy").disabled = true;
+            $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
+            toast("Previous submission replaced with current upload", "success");
         }
     }
 
@@ -1155,6 +1209,22 @@
         // Step 2's Next button, which runs this same commit automatically if
         // the user proceeds without clicking Confirm themselves.
         $("#btnConfirmVendorStrategy")?.addEventListener("click", confirmVendorStrategy);
+        $("#btnDeleteVendorCostModel")?.addEventListener("click", replacePreviousUpload);
+
+        // Add Vendor Strategy — writes a new row straight into
+        // VENDOR_ALIGNED_STRATEGY (ASMT_ID left null; it's only known once
+        // the assortment tool has run for this vendor's DC group), then
+        // re-runs matching so this event's suppliers pick it up immediately.
+        $("#btnShowAddVendorStrategy")?.addEventListener("click", () => {
+            pickedVendorStrategyDcs = new Set();
+            renderVendorStrategyDcPicker();
+            $("#addVendorStrategyForm").style.display = "block";
+            $("#newVendorStrategyName")?.focus();
+        });
+        $("#btnCancelAddVendorStrategy")?.addEventListener("click", () => {
+            $("#addVendorStrategyForm").style.display = "none";
+        });
+        $("#btnSaveVendorStrategy")?.addEventListener("click", saveVendorStrategy);
 
         // Load DC counts button
         $("#btnLoadDcCounts")?.addEventListener("click", loadAvailableDcCounts);
@@ -1364,7 +1434,7 @@
     let dcInclusions = [];
     let dcExclusions = [];
 
-    const ALL_DCS = [
+    let ALL_DCS = [
         { nbr: 5523, name: "Columbus" },
         { nbr: 5820, name: "Chicago" },
         { nbr: 5823, name: "Dallas" },
@@ -1385,6 +1455,39 @@
         { nbr: 6760, name: "Hagerstown" },
         { nbr: 6777, name: "Locust Grove" },
     ];
+
+    // One HD orange -> gray -> navy gradient. Every DC keeps the same fill
+    // everywhere in the app; white text throughout, so the ramp is capped
+    // dark enough (L <= ~0.50) that every step still reads clearly. Steps
+    // were assigned (not just sorted by DC number) by spreading the DCs that
+    // actually co-occur on the same real vendor row as far apart on the line
+    // as a single gradient allows — a couple of adjacent-step pairs are still
+    // close (12 of the 19 DCs co-occur with nearly all the others today, and
+    // one line only has so much room), which is why the DC number itself
+    // stays the real identifier, always printed on the pill.
+    const DC_COLOR = {
+        5523: { fill: "#7e4d35", step: 4 },
+        5820: { fill: "#363d47", step: 13 },
+        5823: { fill: "#9c4415", step: 0 },
+        5829: { fill: "#854b2f", step: 3 },
+        5831: { fill: "#2f3846", step: 14 },
+        5832: { fill: "#12233f", step: 18 },
+        5841: { fill: "#3d4249", step: 12 },
+        5854: { fill: "#5d5148", step: 8 },
+        5855: { fill: "#202e43", step: 16 },
+        5857: { fill: "#764e3a", step: 5 },
+        5860: { fill: "#54524c", step: 9 },
+        5882: { fill: "#655144", step: 7 },
+        5938: { fill: "#954720", step: 1 },
+        6006: { fill: "#192841", step: 17 },
+        6007: { fill: "#45484a", step: 11 },
+        6705: { fill: "#6e503f", step: 6 },
+        6707: { fill: "#273344", step: 15 },
+        6760: { fill: "#8d4928", step: 2 },
+        6777: { fill: "#4c4d4b", step: 10 },
+    };
+    const DC_COLOR_FALLBACK = "#8a8a86"; // mid-gray placeholder for a DC added this session, before the ramp is re-optimized to include it
+    function dcFill(dcNbr) { return (DC_COLOR[dcNbr] || {}).fill || DC_COLOR_FALLBACK; }
 
     function buildDcFilterLists() {
         const inclContainer = $("#dcIncludeList");
@@ -1424,6 +1527,62 @@
             notice.style.display = "block";
         } else {
             notice.style.display = "none";
+        }
+    }
+
+    let pickedVendorStrategyDcs = new Set();
+
+    function renderVendorStrategyDcPicker() {
+        const el = $("#newVendorStrategyDcPicker");
+        if (!el) return;
+        el.innerHTML = ALL_DCS.map(dc => {
+            const active = pickedVendorStrategyDcs.has(dc.nbr);
+            const style = active ? ` style="background:${dcFill(dc.nbr)};color:#fff;border-color:${dcFill(dc.nbr)}"` : "";
+            return `<button type="button" class="dc-toggle-btn vendor-dc-btn${active ? " active" : ""}"${style}
+                data-dc-nbr="${dc.nbr}" title="${dc.name}">${dc.nbr}</button>`;
+        }).join("");
+        el.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+            const dc = Number(b.dataset.dcNbr);
+            pickedVendorStrategyDcs.has(dc) ? pickedVendorStrategyDcs.delete(dc) : pickedVendorStrategyDcs.add(dc);
+            renderVendorStrategyDcPicker();
+        }));
+    }
+
+    async function saveVendorStrategy() {
+        const name = $("#newVendorStrategyName")?.value.trim();
+        if (!name) { toast("Enter a vendor name", "error"); return; }
+        if (!pickedVendorStrategyDcs.size) { toast("Select at least one DC", "error"); return; }
+        showLoading("Adding vendor strategy…");
+        try {
+            const result = await api("/api/vendor_strategy/add", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ vendor: name, dc_list: [...pickedVendorStrategyDcs] }),
+            });
+            toast(result.message || `Added ${name.toUpperCase()}`, "success");
+            $("#addVendorStrategyForm").style.display = "none";
+            $("#newVendorStrategyName").value = "";
+            pickedVendorStrategyDcs = new Set();
+            // Re-run matching so this event's suppliers (including ones
+            // currently falling back to OTHER) pick up the new vendor row.
+            await matchVendorStrategy();
+        } catch (e) {
+            toast("Failed to add vendor strategy: " + e.message, "error");
+        } finally {
+            hideLoading();
+        }
+    }
+
+    // Guards submitCostModel()/loadCostModelPreview() against ever sending an
+    // empty vendor_matches for a Vendor-Aligned event — that's exactly what
+    // makes target_dc_count/dc_inclusions/dc_exclusions come back null, since
+    // the backend can't tell "no vendor-aligned assignments exist" apart from
+    // "this event isn't vendor-aligned." vendorMatches only ever gets
+    // populated by matchVendorStrategy(), so if it's empty here re-run it
+    // rather than submit/preview against stale or never-fetched matches.
+    async function ensureVendorMatchesFresh() {
+        if (selectedStrategy === "VENDOR_ALIGNED" && !vendorMatches.length) {
+            await matchVendorStrategy();
         }
     }
 
@@ -1488,7 +1647,12 @@
         return eligibleDcs.map((dcNbr, index) => {
             const name = vendorDcName(dcNbr, names, index);
             const isActive = selectedDcs.includes(dcNbr);
-            return `<button type="button" class="dc-toggle-btn vendor-dc-btn${extraClass}${isActive ? " active" : ""}"
+            // Every DC keeps one fixed color everywhere (see DC_COLOR) so the
+            // same DC number reads the same regardless of which supplier's
+            // row it appears in — inline style, since `.active`'s CSS color
+            // is shared with unrelated DC-COUNT toggle buttons elsewhere.
+            const style = isActive ? ` style="background:${dcFill(dcNbr)};color:#fff;border-color:${dcFill(dcNbr)}"` : "";
+            return `<button type="button" class="dc-toggle-btn vendor-dc-btn${extraClass}${isActive ? " active" : ""}"${style}
                 title="${name}" aria-label="DC ${dcNbr}: ${name}" data-match-index="${matchIndex}" data-dc-nbr="${dcNbr}"${dataAttrs}>${dcNbr}</button>`;
         }).join("");
     }
@@ -1538,34 +1702,69 @@
         if (!match || !container) return;
         container.innerHTML = '<div class="vendor-sku-loading">Loading SKU details...</div>';
         try {
-            const result = await api(`/api/vendor_skus?supplier=${encodeURIComponent(match.SUPPLIER)}&page=${page}&page_size=50`);
-            if (result.error) throw new Error(result.error);
-            match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
+            // A vendor merged into this one (via "Move to...") still owns its
+            // SKUs under its own SUPPLIER name in EVENTS_SKU_LIST — pull
+            // those in too so the group's SKU list actually shows every SKU
+            // it's now responsible for. Each row keeps its real owner so a
+            // per-SKU override lands on that vendor's own SKU_OVERRIDES
+            // (which is what /api/submit_cost_model reads per vendor), not
+            // on the group's.
+            const owners = [{ index: matchIndex, match }];
+            vendorMatches.forEach((v, i) => { if (v._movedTo === matchIndex) owners.push({ index: i, match: v }); });
+            owners.forEach(o => { o.match.SKU_OVERRIDES = o.match.SKU_OVERRIDES || {}; });
+
+            const FETCH_PAGE_SIZE = 100;
+            const fetches = await Promise.all(owners.map(o =>
+                api(`/api/vendor_skus?supplier=${encodeURIComponent(o.match.SUPPLIER)}&page=1&page_size=${FETCH_PAGE_SIZE}`)
+            ));
+            fetches.forEach(r => { if (r.error) throw new Error(r.error); });
+            const truncated = fetches.some(r => (r.pages || 1) > 1);
+            const allRows = [];
+            fetches.forEach((r, oi) => (r.rows || []).forEach(row => allRows.push({ row, owner: owners[oi] })));
+
+            const DISPLAY_PAGE_SIZE = 50;
+            const totalPages = Math.max(1, Math.ceil(allRows.length / DISPLAY_PAGE_SIZE));
+            const clampedPage = Math.min(Math.max(page, 1), totalPages);
+            const pageRows = allRows.slice((clampedPage - 1) * DISPLAY_PAGE_SIZE, clampedPage * DISPLAY_PAGE_SIZE);
+
             const defaultDcs = parseVendorDcs(match.DC_LIST);
             let html = `<table class="detail-table vendor-sku-table"><thead><tr>
-                <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
-            result.rows.forEach(row => {
-                const selectedDcs = vendorSkuDcs(match, row);
-                html += `<tr><td><div class="vendor-dc-buttons">
+                <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th><th></th></tr></thead><tbody>`;
+            pageRows.forEach(({ row, owner }) => {
+                const selectedDcs = vendorSkuDcs(owner.match, row);
+                html += `<tr data-sku-key="${row.THD_SKU_NBR}"><td><div class="vendor-dc-buttons">
                     ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
-                        dataAttrs: ` data-sku-key="${row.THD_SKU_NBR}"`,
+                        dataAttrs: ` data-sku-key="${row.THD_SKU_NBR}" data-owner-index="${owner.index}"`,
                     })}
-                    </div>${match.SKU_OVERRIDES[row.THD_SKU_NBR] ? '<span class="vendor-sku-override">Override</span>' : ""}</td>
+                    </div>${owner.match.SKU_OVERRIDES[row.THD_SKU_NBR] ? '<span class="vendor-sku-override">Override</span>' : ""}</td>
                     <td class="vendor-sku-count">${selectedDcs.length}</td>
-                    <td>${(match.VENDOR || match.SUPPLIER || "").toUpperCase()}</td>
-                    <td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td></tr>`;
+                    <td>${(owner.match.VENDOR || owner.match.SUPPLIER || "").toUpperCase()}</td>
+                    <td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td>
+                    <td><div class="move-wrap">
+                        <button type="button" class="btn btn-sm btn-secondary vendor-sku-move-btn" data-match-index="${matchIndex}" data-owner-index="${owner.index}" data-sku-key="${row.THD_SKU_NBR}" title="Move this SKU to another vendor's DC group">⋯</button>
+                    </div></td></tr>`;
             });
-            html += `</tbody></table><div class="vendor-sku-footer"><button type="button" class="btn btn-sm btn-secondary vendor-sku-hide"><i class="fas fa-chevron-up"></i> Hide SKUs</button> Page ${result.page} of ${result.pages || 1} · ${result.total} SKU(s)`;
-            if (result.pages > 1) {
-                html += `<button type="button" class="btn btn-sm btn-secondary vendor-sku-next" data-match-index="${matchIndex}" data-page="${result.page + 1}" ${result.page >= result.pages ? "disabled" : ""}>Next</button>`;
+            html += `</tbody></table><div class="vendor-sku-footer"><button type="button" class="btn btn-sm btn-secondary vendor-sku-hide"><i class="fas fa-chevron-up"></i> Hide SKUs</button> Page ${clampedPage} of ${totalPages} · ${allRows.length} SKU(s)${truncated ? " — one or more suppliers truncated at 100 rows" : ""}`;
+            if (totalPages > 1) {
+                html += `<button type="button" class="btn btn-sm btn-secondary vendor-sku-next" data-match-index="${matchIndex}" data-page="${clampedPage + 1}" ${clampedPage >= totalPages ? "disabled" : ""}>Next</button>`;
             }
             html += `</div>`;
             container.innerHTML = html;
             container.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
                 button.addEventListener("click", () => toggleVendorSkuDc(
-                    Number(button.dataset.matchIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
+                    Number(button.dataset.matchIndex), Number(button.dataset.ownerIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
                 ));
+            });
+            container.querySelectorAll(".vendor-sku-move-btn").forEach(button => {
+                button.addEventListener("click", e => {
+                    e.stopPropagation();
+                    const groupIndex = Number(button.dataset.matchIndex);
+                    const ownerIndex = Number(button.dataset.ownerIndex);
+                    const skuKey = button.dataset.skuKey;
+                    openMovePopover(button, ownerIndex, "Move this SKU to another vendor's DC group",
+                        targetIndex => applySkuMove(groupIndex, ownerIndex, skuKey, targetIndex));
+                });
             });
             container.querySelector(".vendor-sku-next")?.addEventListener("click", event => {
                 loadVendorSkuRows(matchIndex, Number(event.currentTarget.dataset.page));
@@ -1576,22 +1775,154 @@
         }
     }
 
-    function toggleVendorSkuDc(matchIndex, skuKey, dcNbr) {
-        const match = vendorMatches[matchIndex];
-        if (!match) return;
-        match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
-        const selected = parseVendorDcs(match.SKU_OVERRIDES[skuKey] || match.DC_LIST);
+    // "Move to..." lets a supplier (or, per-SKU below, one SKU) adopt another
+    // vendor's DC group wholesale, without hand-toggling each pill — the
+    // alternative to dragging a row onto another one, since the rows aren't
+    // fixed drop targets and dragging would need its own keyboard/touch
+    // fallback for the same result this already gives with a click.
+    function closeMovePopover() {
+        document.querySelectorAll(".move-pop").forEach(p => p.remove());
+    }
+    document.addEventListener("click", e => { if (!e.target.closest(".move-wrap")) closeMovePopover(); });
+
+    function moveTargetOptions(excludeIndex) {
+        // A vendor that's itself been moved away is just borrowing its
+        // target's DCs — not a real group to move a third vendor into.
+        return vendorMatches
+            .map((v, i) => ({ i, v }))
+            .filter(({ i, v }) => i !== excludeIndex && v._movedTo == null);
+    }
+
+    function openMovePopover(anchorButton, excludeIndex, label, onPick) {
+        closeMovePopover();
+        const options = moveTargetOptions(excludeIndex);
+        if (!options.length) { toast("No other vendor to move to yet", "error"); return; }
+        const pop = document.createElement("div");
+        pop.className = "move-pop";
+        pop.innerHTML = `<div class="move-pop-label">${label}</div>` + options.map(({ i, v }) =>
+            `<button type="button" data-target-index="${i}">${(v.VENDOR || v.SUPPLIER || "").toUpperCase()}
+                <span>${parseVendorDcs(v.DC_LIST).length} DCs</span></button>`).join("");
+        pop.querySelectorAll("button[data-target-index]").forEach(b => b.addEventListener("click", e => {
+            e.stopPropagation();
+            onPick(Number(b.dataset.targetIndex));
+            closeMovePopover();
+        }));
+        anchorButton.parentElement.appendChild(pop);
+    }
+
+    function applyVendorMove(matchIndex, targetIndex) {
+        const src = vendorMatches[matchIndex], tgt = vendorMatches[targetIndex];
+        if (!src || !tgt) return;
+        // The DC/SKU data actually moves (needed for /api/submit_cost_model
+        // to assign these SKUs to the target's DCs) — _movedTo is purely a
+        // display flag so the source collapses into the target's row instead
+        // of sitting there as its own row with borrowed DCs.
+        const targetDcs = parseVendorDcs(tgt.DC_LIST);
+        const rehome = m => {
+            m.DC_LIST = targetDcs.join(", ");
+            m.DC_COUNT = targetDcs.length;
+            m.DC_NM_LIST = tgt.DC_NM_LIST;
+            m._movedTo = targetIndex;
+        };
+        rehome(src);
+        // Cascade: anyone already merged into src follows it to its new
+        // target — moving "DEWALT (+ BOSCH)" into MAKITA becomes
+        // "MAKITA (+ DEWALT, + BOSCH)" instead of leaving BOSCH pointing at
+        // a DEWALT row that's now itself just a pointer to MAKITA.
+        vendorMatches.forEach(m => { if (m._movedTo === matchIndex) rehome(m); });
+        toast(`${(src.VENDOR || src.SUPPLIER || "").toUpperCase()} moved under ${(tgt.VENDOR || tgt.SUPPLIER || "").toUpperCase()}`, "success");
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
+    function undoVendorMove(matchIndex) {
+        const src = vendorMatches[matchIndex];
+        if (!src) return;
+        const initialDcs = parseVendorDcs(src._initialDcList);
+        src.DC_LIST = initialDcs.join(", ");
+        src.DC_COUNT = initialDcs.length;
+        src.DC_NM_LIST = src._initialDcNames;
+        delete src._movedTo;
+        toast(`${(src.VENDOR || src.SUPPLIER || "").toUpperCase()} restored to its own DC group`, "success");
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
+    // Repaints one already-rendered SKU row's DC buttons/count/override badge
+    // in place, without a network round trip. THD_SKU_NBR/SKU_DESC/units/cube
+    // don't change when a DC override is toggled or a SKU is moved — only the
+    // client-side SKU_OVERRIDES state does — so there's nothing here that
+    // /api/vendor_skus needs to be asked about again, unlike the initial page
+    // load or paging to a different set of SKUs.
+    // groupIndex is whichever vendor's "View SKUs" panel is open (the
+    // #vendor-skus-N container to find/patch); ownerIndex is whichever
+    // vendor's SUPPLIER this particular SKU row actually belongs to — the
+    // same vendor for a normal row, but a merged-in vendor (see "Move
+    // to...") for a row pulled in from its group. SKU_OVERRIDES always
+    // lives on the owner, since that's what /api/submit_cost_model reads.
+    function rerenderVendorSkuRow(groupIndex, ownerIndex, skuKey) {
+        const group = vendorMatches[groupIndex];
+        const owner = vendorMatches[ownerIndex];
+        const container = $(`#vendor-skus-${groupIndex}`);
+        if (!group || !owner || !container) return;
+        const row = container.querySelector(`tr[data-sku-key="${CSS.escape(String(skuKey))}"]`);
+        if (!row) return;
+
+        const defaultDcs = parseVendorDcs(group.DC_LIST);
+        const names = parseVendorNames(group._initialDcNames);
+        const selectedDcs = parseVendorDcs(owner.SKU_OVERRIDES[skuKey] || owner.DC_LIST);
+
+        const btnCell = row.querySelector(".vendor-dc-buttons");
+        if (btnCell) {
+            btnCell.innerHTML = renderDcButtonGrid(groupIndex, defaultDcs, names, selectedDcs, {
+                extraClass: " vendor-sku-dc-btn",
+                dataAttrs: ` data-sku-key="${skuKey}" data-owner-index="${ownerIndex}"`,
+            });
+            btnCell.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
+                button.addEventListener("click", () => toggleVendorSkuDc(
+                    Number(button.dataset.matchIndex), Number(button.dataset.ownerIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
+                ));
+            });
+        }
+
+        const overrideHolder = btnCell?.parentElement;
+        const existingBadge = overrideHolder?.querySelector(".vendor-sku-override");
+        const hasOverride = !!owner.SKU_OVERRIDES[skuKey];
+        if (hasOverride && !existingBadge) {
+            overrideHolder.insertAdjacentHTML("beforeend", '<span class="vendor-sku-override">Override</span>');
+        } else if (!hasOverride && existingBadge) {
+            existingBadge.remove();
+        }
+
+        const countCell = row.querySelector(".vendor-sku-count");
+        if (countCell) countCell.textContent = selectedDcs.length;
+    }
+
+    function applySkuMove(groupIndex, ownerIndex, skuKey, targetIndex) {
+        const owner = vendorMatches[ownerIndex], target = vendorMatches[targetIndex];
+        if (!owner || !target) return;
+        owner.SKU_OVERRIDES = owner.SKU_OVERRIDES || {};
+        const targetDcs = parseVendorDcs(target.DC_LIST);
+        const defaults = parseVendorDcs(owner.DC_LIST);
+        if (targetDcs.join(",") === defaults.join(",")) delete owner.SKU_OVERRIDES[skuKey];
+        else owner.SKU_OVERRIDES[skuKey] = targetDcs;
+        toast(`SKU moved to ${(target.VENDOR || target.SUPPLIER || "").toUpperCase()}'s DC group`, "success");
+        rerenderVendorSkuRow(groupIndex, ownerIndex, skuKey);
+    }
+
+    function toggleVendorSkuDc(groupIndex, ownerIndex, skuKey, dcNbr) {
+        const owner = vendorMatches[ownerIndex];
+        if (!owner) return;
+        owner.SKU_OVERRIDES = owner.SKU_OVERRIDES || {};
+        const selected = parseVendorDcs(owner.SKU_OVERRIDES[skuKey] || owner.DC_LIST);
         if (selected.length === 1 && selected[0] === dcNbr) {
             toast("Each SKU must have at least one DC selected", "error");
             return;
         }
         const next = selected.includes(dcNbr) ? selected.filter(dc => dc !== dcNbr) : [...selected, dcNbr];
         next.sort((a, b) => a - b);
-        const defaults = parseVendorDcs(match.DC_LIST);
-        if (next.join(",") === defaults.join(",")) delete match.SKU_OVERRIDES[skuKey];
-        else match.SKU_OVERRIDES[skuKey] = next;
-        const page = Number($(`#vendor-skus-${matchIndex} .vendor-sku-next`)?.dataset.page || 1) - 1 || 1;
-        loadVendorSkuRows(matchIndex, page);
+        const defaults = parseVendorDcs(owner.DC_LIST);
+        if (next.join(",") === defaults.join(",")) delete owner.SKU_OVERRIDES[skuKey];
+        else owner.SKU_OVERRIDES[skuKey] = next;
+        rerenderVendorSkuRow(groupIndex, ownerIndex, skuKey);
     }
 
     // Per-supplier rollup of the vendor-strategy match: SKU count comes from
@@ -1663,33 +1994,74 @@
                 ${missingNames.length ? `<div class="vendor-reconcile-namelist"><strong>Missing:</strong> ${missingNames.join(", ")}</div>` : ""}
             </div>`;
         }
+        // Vendors merged into another vendor's group (via "Move to...") are
+        // grouped under their target's row rather than kept as their own —
+        // this is who's merged into which target index.
+        const mergedInto = {};
+        matches.forEach((m, i) => {
+            if (m._movedTo == null) return;
+            (mergedInto[m._movedTo] ||= []).push(i);
+        });
+
         html += `<div class="table-container vendor-dc-table-wrap"><table class="detail-table vendor-dc-table">
-            <thead><tr><th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>Matched THD Key</th></tr></thead><tbody>`;
+            <thead><tr><th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>Matched THD Key</th><th></th></tr></thead><tbody>`;
         matches.forEach((m, matchIndex) => {
             const isOther = (m.VENDOR || "").toUpperCase() === "OTHER";
             const isNew = newSuppliers.has(norm(m.VENDOR || m.SUPPLIER));
             if (!m._initialDcList) m._initialDcList = parseVendorDcs(m.DC_LIST).join(", ");
             if (!m._initialDcNames) m._initialDcNames = Array.isArray(m.DC_NM_LIST) ? m.DC_NM_LIST.join(", ") : (m.DC_NM_LIST || "");
+            const matchedVendor = (m.VENDOR || m.SUPPLIER || "").toUpperCase();
+
+            // A vendor that's been moved collapses to a single greyed-out
+            // line — its DCs/SKUs now live under the target's row, and
+            // "Undo" is the only way back (no DC pills to hand-edit here).
+            if (m._movedTo != null) {
+                const target = vendorMatches[m._movedTo];
+                html += `<tr class="vendor-row-moved">
+                    <td colspan="4"><em>${matchedVendor}</em> moved under <strong>${(target?.VENDOR || target?.SUPPLIER || "").toUpperCase()}</strong></td>
+                    <td class="vendor-row-actions">
+                        <button type="button" class="btn btn-sm btn-secondary vendor-undo-move-btn" data-match-index="${matchIndex}">
+                            <i class="fas fa-rotate-left"></i> Undo
+                        </button>
+                    </td></tr>`;
+                return;
+            }
+            if (vendorSkuExpanded.has(matchIndex)) {
+                html += `<tr class="vendor-sku-detail-row"><td colspan="5"><div id="vendor-skus-${matchIndex}" class="vendor-sku-details"></div></td></tr>`;
+                return;
+            }
+
             const selectedDcs = parseVendorDcs(m.DC_LIST);
             const initialDcs = parseVendorDcs(m._initialDcList);
             const names = parseVendorNames(m._initialDcNames);
-            if (vendorSkuExpanded.has(matchIndex)) {
-                html += `<tr class="vendor-sku-detail-row"><td colspan="4"><div id="vendor-skus-${matchIndex}" class="vendor-sku-details"></div></td></tr>`;
-                return;
-            }
-            const matchedVendor = (m.VENDOR || m.SUPPLIER || "").toUpperCase();
+
+            // Vendors merged INTO this one — shown as a badge line under the
+            // name, and folded into the THD-key count so the total reads as
+            // "everything this DC group is now responsible for."
+            const mergedHere = (mergedInto[matchIndex] || []).map(i => matches[i]);
+            const mergedBadges = mergedHere.length
+                ? `<div class="vendor-merged-badges">${mergedHere.map(mv =>
+                    `<span class="vendor-merged-badge">+ ${(mv.VENDOR || mv.SUPPLIER || "").toUpperCase()}</span>`).join("")}</div>`
+                : "";
+            const combinedSkuCount = Number(m.SKU_COUNT || 0) + mergedHere.reduce((sum, mv) => sum + Number(mv.SKU_COUNT || 0), 0);
+
             html += `<tr${isNew ? ' class="vendor-supplier-new"' : ""}><td><div class="vendor-dc-buttons">
                 ${renderDcButtonGrid(matchIndex, initialDcs, names, selectedDcs)}
                 </div></td><td class="vendor-dc-count">${selectedDcs.length}</td>
                 <td><strong>${isNew ? '<i class="fas fa-plus vendor-new-icon" title="Not in a comparable last-year row"></i> ' : ""}${matchedVendor}</strong>${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
-                    : ""}</td>
-                <td style="text-align:right"><div>${fmtNum(m.SKU_COUNT)}</div>
-                <button type="button" class="btn btn-sm btn-secondary vendor-sku-toggle" data-match-index="${matchIndex}">
-                    <i class="fas fa-chevron-${vendorSkuExpanded.has(matchIndex) ? "up" : "down"}"></i> ${vendorSkuExpanded.has(matchIndex) ? "Hide" : "View"} SKUs
-                </button></td></tr>`;
+                    : ""}${mergedBadges}</td>
+                <td style="text-align:right">${fmtNum(combinedSkuCount)}</td>
+                <td class="vendor-row-actions">
+                    <button type="button" class="btn btn-sm btn-secondary vendor-sku-toggle" data-match-index="${matchIndex}">
+                        <i class="fas fa-chevron-${vendorSkuExpanded.has(matchIndex) ? "up" : "down"}"></i> ${vendorSkuExpanded.has(matchIndex) ? "Hide" : "View"} SKUs
+                    </button>
+                    <div class="move-wrap">
+                        <button type="button" class="btn btn-sm btn-secondary vendor-move-btn" data-match-index="${matchIndex}" title="Move this supplier to another vendor's DC group">⋯</button>
+                    </div>
+                </td></tr>`;
         });
-        html += `</tbody><tfoot><tr><td colspan="4" class="vendor-dc-total">Total matched THD Keys: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))}</td></tr></tfoot></table></div>`;
+        html += `</tbody><tfoot><tr><td colspan="5" class="vendor-dc-total">Total matched THD Keys: ${fmtNum(totalSkus ?? matches.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0))}</td></tr></tfoot></table></div>`;
         box.innerHTML = html;
         box.querySelectorAll(".vendor-dc-btn").forEach(button => {
             button.addEventListener("click", () => toggleVendorDc(
@@ -1698,6 +2070,17 @@
         });
         box.querySelectorAll(".vendor-sku-toggle").forEach(button => {
             button.addEventListener("click", () => toggleVendorSkuRows(Number(button.dataset.matchIndex)));
+        });
+        box.querySelectorAll(".vendor-move-btn").forEach(button => {
+            button.addEventListener("click", e => {
+                e.stopPropagation();
+                const matchIndex = Number(button.dataset.matchIndex);
+                openMovePopover(button, matchIndex, "Move to this vendor's DC group",
+                    targetIndex => applyVendorMove(matchIndex, targetIndex));
+            });
+        });
+        box.querySelectorAll(".vendor-undo-move-btn").forEach(button => {
+            button.addEventListener("click", () => undoVendorMove(Number(button.dataset.matchIndex)));
         });
         vendorSkuExpanded.forEach(matchIndex => loadVendorSkuRows(matchIndex, 1));
     }
@@ -2545,6 +2928,18 @@
             userEmail = u.email || "";
             $("#userBadge").innerHTML = `<i class="fas fa-user"></i> ${ldapUser || "—"}`;
         } catch { /* ok */ }
+
+        // Pick up any DC someone added via "Add DC to network" earlier this
+        // server session (ALL_DCS otherwise starts from the hardcoded list
+        // above, same as config.py's DC_NAMES).
+        try {
+            const cfg = await api("/api/config");
+            for (const [nbrStr, name] of Object.entries(cfg.dc_names || {})) {
+                const nbr = Number(nbrStr);
+                if (!ALL_DCS.some(dc => dc.nbr === nbr)) ALL_DCS.push({ nbr, name });
+            }
+            ALL_DCS.sort((a, b) => a.nbr - b.nbr);
+        } catch { /* ok — falls back to the hardcoded ALL_DCS above */ }
 
         setupStepperClicks();
         setupTemplateDownload();

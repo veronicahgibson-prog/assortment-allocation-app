@@ -340,10 +340,42 @@
                     <div id="vendorMatchResult" style="display:none;margin-top:12px">
                         <div id="vendorMatchSummary" style="margin-bottom:10px"></div>
                         <div id="vendorSupplierSummary" style="margin-top:14px"></div>
-                        <div id="vendorConfirmBox" style="margin-top:12px">
-                            <button class="btn btn-primary" id="btnConfirmVendorStrategy">
-                                <i class="fas fa-check"></i> Confirm Vendor Strategies
+
+                        <div style="display:flex;justify-content:center;margin-top:10px">
+                            <button type="button" class="btn btn-sm btn-secondary" id="btnShowAddVendorStrategy">
+                                <i class="fas fa-plus"></i> Add Vendor Strategy
                             </button>
+                        </div>
+                        <div id="addVendorStrategyForm" style="display:none;margin-top:10px;padding:14px 16px;border:1.5px dashed var(--hd-light-gray);border-radius:8px">
+                            <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+                                <div>
+                                    <label style="font-size:.72rem;font-weight:700;color:var(--hd-medium-gray);text-transform:uppercase">Vendor name</label>
+                                    <select id="newVendorStrategyName"
+                                        style="display:block;width:280px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
+                                        <option value="">Select a supplier from this upload…</option>
+                                    </select>
+                                    <input type="text" id="newVendorStrategyNameCustom" placeholder="e.g. TOTAL TOOLS CO"
+                                        style="display:none;width:280px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:6px">
+                                </div>
+                            </div>
+                            <label style="font-size:.72rem;font-weight:700;color:var(--hd-medium-gray);text-transform:uppercase">DC assignment</label>
+                            <div id="newVendorStrategyDcPicker" class="vendor-dc-buttons" style="margin-top:6px"></div>
+                            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:12px">
+                                <button type="button" class="btn btn-sm btn-secondary" id="btnCancelAddVendorStrategy">Cancel</button>
+                                <button type="button" class="btn btn-sm btn-primary" id="btnSaveVendorStrategy">Save vendor strategy</button>
+                            </div>
+                        </div>
+
+                        <div id="vendorConfirmBox" style="margin-top:12px">
+                            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                                <button class="btn btn-primary" id="btnConfirmVendorStrategy">
+                                    <i class="fas fa-check"></i> Confirm Vendor Strategies
+                                </button>
+                                <button class="btn btn-sm" id="btnDeleteVendorCostModel" style="display:none;background:#dc3545;color:#fff;font-size:0.8rem;padding:6px 12px">
+                                    <i class="fas fa-rotate"></i> Replace Previous Upload
+                                </button>
+                            </div>
+                            <div id="vendorSubmitStatus" style="margin-top:10px"></div>
                         </div>
                         <div id="vendorChartContainer" style="display:none;max-width:400px;margin:20px auto 0">
                             <canvas id="vendorPieChart"></canvas>
@@ -587,6 +619,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=309"></script>
+    <script src="/static/js/app.js?v=311"></script>
 </body>
 </html>

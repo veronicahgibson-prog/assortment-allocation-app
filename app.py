@@ -962,7 +962,12 @@ def api_match_vendor_strategy():
         sku_counts = work.groupby("SUPPLIER")["_THD_KEY"].nunique().to_dict()
     elif event_name:
         try:
-            q = f"""SELECT SUPPLIER, COUNT(DISTINCT THD_SKU_NBR) AS SKU_COUNT
+            # THD_SKU_NBR alone isn't a unique key — the same THD_SKU_NBR can
+            # appear under two different MVNDR_NBR (see _determine_thd_key in
+            # validators.py, used by the upload-cache path above). Count on
+            # the same composite key so this fallback doesn't undercount.
+            q = f"""SELECT SUPPLIER,
+                           COUNT(DISTINCT CONCAT(CAST(THD_SKU_NBR AS STRING), '|', CAST(MVNDR_NBR AS STRING))) AS SKU_COUNT
                     FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev AND SUPPLIER IS NOT NULL
                     GROUP BY SUPPLIER"""
             jc = bigquery.QueryJobConfig(query_parameters=[
@@ -1095,38 +1100,6 @@ def api_add_vendor_strategy():
     except Exception as e:
         logger.exception("Add vendor strategy error")
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/dc_network/add", methods=["POST"])
-def api_add_dc_network():
-    """Register a new DC number/name for this running app instance.
-
-    DC_NAMES/ALLOWED_DFCS are plain Python constants in config.py, not a
-    BigQuery table — so this only extends the in-memory dict for the
-    lifetime of this server process. Making it durable across restarts
-    means adding the DC to config.py (and deploying), or standing up a real
-    DC-master table; this endpoint deliberately doesn't do either on its own.
-    """
-    body = request.get_json(silent=True) or {}
-    try:
-        dc_nbr = int(body.get("dc_nbr"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "dc_nbr must be a number."}), 400
-    dc_name = (body.get("dc_name") or "").strip()
-    if not dc_name:
-        return jsonify({"error": "dc_name is required."}), 400
-    if dc_nbr in DC_NAMES:
-        return jsonify({"error": f"DC {dc_nbr} already exists ({DC_NAMES[dc_nbr]})."}), 409
-
-    DC_NAMES[dc_nbr] = dc_name
-    logger.warning(f"Added DC {dc_nbr} ({dc_name}) to the in-memory DC network — "
-                    "this does not persist past a server restart; update config.py to make it permanent.")
-    return jsonify({
-        "success": True,
-        "message": f"Added DC {dc_nbr} ({dc_name}) for this session. This won't survive a restart — "
-                    "add it to config.py's DC_NAMES (and ALLOWED_DFCS for the relevant event types) to make it permanent.",
-        "dc_names": {str(k): v for k, v in DC_NAMES.items()},
-    })
 
 
 # ── Section 4b: DFC Cost Model Submission ────────────────────────────
