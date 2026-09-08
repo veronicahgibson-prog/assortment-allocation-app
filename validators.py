@@ -316,14 +316,11 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
                 pass
 
         if name_mismatch or year_mismatch:
-            parts = []
-            if name_mismatch:
-                parts.append(f"file EVENT_NAME '{file_event_name}' vs. Step 1's '{step1_event_name.strip().upper()}'")
-            if year_mismatch:
-                parts.append(f"file EVENT_YEAR {file_event_year} vs. Step 1's {step1_event_year}")
+            step1_label = f"{step1_event_name.strip().upper()} {step1_event_year}".strip()
+            file_label = f"{file_event_name or '—'} {file_event_year if file_event_year is not None else '—'}".strip()
             step1_mismatch.append({
                 "row": "—", "column": "EVENT_NAME/EVENT_YEAR", "row_data": {},
-                "message": "Doesn't match the event selected in Step 1 — " + "; ".join(parts),
+                "message": f"Step 1: {step1_label}  —  File: {file_label}",
             })
     checks.append({
         "id": 7,
