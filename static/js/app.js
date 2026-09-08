@@ -387,8 +387,8 @@
             const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
             let html = `<div class="prior-strategy-card">
                 <div class="prior-strategy-heading">
-                    <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}${eventTypeLabel ? " " + eventTypeLabel : ""}</span>
-                        <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
+                    <div><span class="prior-strategy-kicker">${strategyLabel}</span>
+                        <h4><i class="fas fa-calendar-days"></i> ${result.event_name} <span style="color:var(--hd-orange)">${result.event_year}</span>${eventTypeLabel ? " " + eventTypeLabel : ""}</h4></div>
                     <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
                 </div>
                 <div class="prior-strategy-metrics">
