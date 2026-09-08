@@ -30,6 +30,12 @@
     // default to checked without re-checking a box the user just unchecked
     // for that same lookup.
     let followLastYearAppliedFor = null;
+    // "name|year|isImport" key of the last combination auto-checked for a
+    // prior-year match on arrival at Step 2 — avoids re-fetching every time
+    // the user revisits Step 2 with the same Step 1 inputs. Set by
+    // triggerAutoPriorYearCheck (assigned in setupPriorYearStrategy).
+    let autoPriorYearCheckedFor = null;
+    let triggerAutoPriorYearCheck = null;
     let assortmentResults = [];
     let resultsPage = 1;
     let resultsSort = "SKU_NBR";
@@ -172,8 +178,14 @@
         }
 
         // Refresh the "Follow last year's strategy?" offer when arriving at
-        // Step 2, in case Step 1's lookup changed since last time.
-        if (n === 2) refreshFollowLastYearUI();
+        // Step 2, in case Step 1's lookup changed since last time. Also
+        // silently checks for a prior-year match on the user's behalf if
+        // they never clicked "View Last Year's Strategy" themselves —
+        // refreshFollowLastYearUI() runs again once that resolves.
+        if (n === 2) {
+            triggerAutoPriorYearCheck?.();
+            refreshFollowLastYearUI();
+        }
 
         // Load cost model preview when arriving at step 6
         if (n === 6) loadCostModelPreview();
@@ -335,6 +347,68 @@
             return select?.value || "";
         }
 
+        // Shared by the manual "View Last Year's Strategy" click and the
+        // silent auto-check triggered on arrival at Step 2 — fetches the
+        // prior-year lookup, records it onto lastPriorYearStrategy, and (when
+        // Step 1's section is present) renders the same summary card either
+        // way, so revisiting Step 1 after an auto-check shows the same thing
+        // a manual check would have.
+        async function performPriorYearCheck(name, year, isImportVal) {
+            const params = new URLSearchParams({ event_name: name, event_year: year });
+            if (isImportVal) params.set("is_import", isImportVal);
+            const result = await api(`/api/prior_year_strategy?${params}`);
+            // Stamp the event type used for this lookup onto the result so
+            // Step 2's "Follow last year's strategy?" label can name it
+            // without guessing at whatever Step 1's toggle currently shows
+            // (which could have changed since this fetch ran).
+            lastPriorYearStrategy = result.found ? { ...result, _isImportVal: isImportVal } : null;
+            const section = $("#priorStrategySection");
+            if (!section) return result;
+            section.style.display = "block";
+            if (!result.found) {
+                section.innerHTML = `<p style="margin:0;color:#666;font-size:.85rem">
+                    <i class="fas fa-circle-info"></i> ${name} has no history.</p>`;
+                return result;
+            }
+            const o = result.overall;
+            const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
+            const strategyLabel = isVendorAligned ? "Vendor-Aligned Strategy" : (o.strategy_type || "Strategy Not Recorded");
+            const countLabel = isVendorAligned ? "Suppliers" : "Assortments";
+            // Vendor-aligned rows can list more than one vendor per row (rows
+            // sharing an identical DC list are merged) so the supplier count
+            // is the number of vendor names across all rows, not the row count.
+            const countValue = isVendorAligned
+                ? (result.strategy_summary || []).reduce((sum, s) => sum + (s.vendor ? s.vendor.split(", ").length : 0), 0)
+                : (result.strategy_summary?.length || 0);
+            const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
+            let html = `<div class="prior-strategy-card">
+                <div class="prior-strategy-heading">
+                    <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}${eventTypeLabel ? " " + eventTypeLabel : ""}</span>
+                        <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
+                    <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
+                </div>
+                <div class="prior-strategy-metrics">
+                    <div><span>${countLabel}</span><strong>${fmtNum(countValue)}</strong></div>
+                    <div><span>Total Units</span><strong>${fmtNum(o.total_units)}</strong></div>
+                    <div><span>Total Cube (ft&sup3;)</span><strong>${fmtCube(o.total_cube)}</strong></div>
+                    <div><span>Total THD Keys</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
+                    <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
+                </div>`;
+            if (result.strategy_summary?.length) {
+                html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
+                for (const s of result.strategy_summary) {
+                    const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
+                    const rowClass = isVendorAligned ? " prior-strategy-detail-row-vendor" : "";
+                    const thdKeysCell = isVendorAligned ? `<span>${fmtNum(s.thd_key_count)} THD Keys</span>` : "";
+                    html += `<div class="prior-strategy-detail-row${rowClass}"><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><strong>${label}</strong>${thdKeysCell}</div>`;
+                }
+                html += `</div>`;
+            }
+            html += `</div>`;
+            section.innerHTML = html;
+            return result;
+        }
+
         $("#btnCheckPriorStrategy")?.addEventListener("click", async () => {
             if (select?.value === "__other__") {
                 toast("Last year's strategy is only available for an existing event", "error");
@@ -342,8 +416,6 @@
             }
             const name = currentEventName();
             const year = yearInput?.value?.trim();
-            const section = $("#priorStrategySection");
-            if (!section) return;
             if (!name || !year) {
                 toast("Enter an event name and year first", "error");
                 return;
@@ -351,62 +423,36 @@
             const isImportVal = document.querySelector('input[name="importToggle"]:checked')?.value;
             showLoading("Checking for a prior year's strategy…");
             try {
-                const params = new URLSearchParams({ event_name: name, event_year: year });
-                if (isImportVal) params.set("is_import", isImportVal);
-                const result = await api(`/api/prior_year_strategy?${params}`);
-                // Stamp the event type used for this lookup onto the result so
-                // Step 2's "Follow last year's strategy?" label can name it
-                // without guessing at whatever Step 1's toggle currently shows
-                // (which could have changed since this fetch ran).
-                lastPriorYearStrategy = result.found ? { ...result, _isImportVal: isImportVal } : null;
-                section.style.display = "block";
-                if (!result.found) {
-                    section.innerHTML = `<p style="margin:0;color:#666;font-size:.85rem">
-                        <i class="fas fa-circle-info"></i> ${name} has no history.</p>`;
-                    return;
-                }
-                const o = result.overall;
-                const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
-                const strategyLabel = isVendorAligned ? "Vendor-Aligned Strategy" : (o.strategy_type || "Strategy Not Recorded");
-                const countLabel = isVendorAligned ? "Suppliers" : "Assortments";
-                // Vendor-aligned rows can list more than one vendor per row (rows
-                // sharing an identical DC list are merged) so the supplier count
-                // is the number of vendor names across all rows, not the row count.
-                const countValue = isVendorAligned
-                    ? (result.strategy_summary || []).reduce((sum, s) => sum + (s.vendor ? s.vendor.split(", ").length : 0), 0)
-                    : (result.strategy_summary?.length || 0);
-                const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
-                let html = `<div class="prior-strategy-card">
-                    <div class="prior-strategy-heading">
-                        <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}${eventTypeLabel ? " " + eventTypeLabel : ""}</span>
-                            <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
-                        <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
-                    </div>
-                    <div class="prior-strategy-metrics">
-                        <div><span>${countLabel}</span><strong>${fmtNum(countValue)}</strong></div>
-                        <div><span>Total Units</span><strong>${fmtNum(o.total_units)}</strong></div>
-                        <div><span>Total Cube (ft&sup3;)</span><strong>${fmtCube(o.total_cube)}</strong></div>
-                        <div><span>Total THD Keys</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
-                        <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
-                    </div>`;
-                if (result.strategy_summary?.length) {
-                    html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
-                    for (const s of result.strategy_summary) {
-                        const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
-                        const rowClass = isVendorAligned ? " prior-strategy-detail-row-vendor" : "";
-                        const thdKeysCell = isVendorAligned ? `<span>${fmtNum(s.thd_key_count)} THD Keys</span>` : "";
-                        html += `<div class="prior-strategy-detail-row${rowClass}"><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><strong>${label}</strong>${thdKeysCell}</div>`;
-                    }
-                    html += `</div>`;
-                }
-                html += `</div>`;
-                section.innerHTML = html;
+                await performPriorYearCheck(name, year, isImportVal);
+                autoPriorYearCheckedFor = `${name}|${year}|${isImportVal}`;
             } catch (e) {
                 toast("Failed to check prior year strategy: " + e.message, "error");
             } finally {
                 hideLoading();
             }
         });
+
+        // Silently runs the same lookup when the user reaches Step 2 without
+        // ever clicking "View Last Year's Strategy" — if there's a matching
+        // prior-year event, Step 2 pre-fills from it just like a manual check
+        // would; if there's no match, this quietly does nothing. Skipped for
+        // a brand-new ("__other__") event, which by definition has no history.
+        triggerAutoPriorYearCheck = async () => {
+            if (select?.value === "__other__") return;
+            const name = currentEventName();
+            const year = yearInput?.value?.trim();
+            if (!name || !year) return;
+            const isImportVal = document.querySelector('input[name="importToggle"]:checked')?.value;
+            const key = `${name}|${year}|${isImportVal}`;
+            if (autoPriorYearCheckedFor === key) return;
+            autoPriorYearCheckedFor = key;
+            try {
+                await performPriorYearCheck(name, year, isImportVal);
+            } catch (e) {
+                return; // best-effort convenience pre-fill — not worth surfacing an error for
+            }
+            if (currentStep === 2) refreshFollowLastYearUI();
+        };
     }
 
     // ── Section 2: File Upload ─────────────────────────────────────
