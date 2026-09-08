@@ -30,6 +30,16 @@
     // default to checked without re-checking a box the user just unchecked
     // for that same lookup.
     let followLastYearAppliedFor = null;
+    // "name|year|isImport" key of the last combination auto-checked for a
+    // prior-year match on arrival at Step 2 — avoids re-fetching every time
+    // the user revisits Step 2 with the same Step 1 inputs. Set by
+    // triggerAutoPriorYearCheck (assigned in setupPriorYearStrategy).
+    let autoPriorYearCheckedFor = null;
+    let triggerAutoPriorYearCheck = null;
+    // True while triggerAutoPriorYearCheck's lookup is in flight — Next is
+    // blocked during this window so the user can't proceed a beat before
+    // the prior-year strategy (e.g. Vendor-Aligned) actually gets selected.
+    let priorYearCheckInFlight = false;
     let assortmentResults = [];
     let resultsPage = 1;
     let resultsSort = "SKU_NBR";
@@ -172,8 +182,14 @@
         }
 
         // Refresh the "Follow last year's strategy?" offer when arriving at
-        // Step 2, in case Step 1's lookup changed since last time.
-        if (n === 2) refreshFollowLastYearUI();
+        // Step 2, in case Step 1's lookup changed since last time. Also
+        // silently checks for a prior-year match on the user's behalf if
+        // they never clicked "View Last Year's Strategy" themselves —
+        // refreshFollowLastYearUI() runs again once that resolves.
+        if (n === 2) {
+            triggerAutoPriorYearCheck?.();
+            refreshFollowLastYearUI();
+        }
 
         // Load cost model preview when arriving at step 6
         if (n === 6) loadCostModelPreview();
@@ -335,6 +351,68 @@
             return select?.value || "";
         }
 
+        // Shared by the manual "View Last Year's Strategy" click and the
+        // silent auto-check triggered on arrival at Step 2 — fetches the
+        // prior-year lookup, records it onto lastPriorYearStrategy, and (when
+        // Step 1's section is present) renders the same summary card either
+        // way, so revisiting Step 1 after an auto-check shows the same thing
+        // a manual check would have.
+        async function performPriorYearCheck(name, year, isImportVal) {
+            const params = new URLSearchParams({ event_name: name, event_year: year });
+            if (isImportVal) params.set("is_import", isImportVal);
+            const result = await api(`/api/prior_year_strategy?${params}`);
+            // Stamp the event type used for this lookup onto the result so
+            // Step 2's "Follow last year's strategy?" label can name it
+            // without guessing at whatever Step 1's toggle currently shows
+            // (which could have changed since this fetch ran).
+            lastPriorYearStrategy = result.found ? { ...result, _isImportVal: isImportVal } : null;
+            const section = $("#priorStrategySection");
+            if (!section) return result;
+            section.style.display = "block";
+            if (!result.found) {
+                section.innerHTML = `<p style="margin:0;color:#666;font-size:.85rem">
+                    <i class="fas fa-circle-info"></i> ${name} has no history.</p>`;
+                return result;
+            }
+            const o = result.overall;
+            const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
+            const strategyLabel = isVendorAligned ? "Vendor-Aligned Strategy" : (o.strategy_type || "Strategy Not Recorded");
+            const countLabel = isVendorAligned ? "Suppliers" : "Assortments";
+            // Vendor-aligned rows can list more than one vendor per row (rows
+            // sharing an identical DC list are merged) so the supplier count
+            // is the number of vendor names across all rows, not the row count.
+            const countValue = isVendorAligned
+                ? (result.strategy_summary || []).reduce((sum, s) => sum + (s.vendor ? s.vendor.split(", ").length : 0), 0)
+                : (result.strategy_summary?.length || 0);
+            const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
+            let html = `<div class="prior-strategy-card">
+                <div class="prior-strategy-heading">
+                    <div><span class="prior-strategy-kicker">${strategyLabel}</span>
+                        <h4><i class="fas fa-calendar-days"></i> ${result.event_name} <span style="color:var(--hd-orange)">${result.event_year}</span>${eventTypeLabel ? " " + eventTypeLabel : ""}</h4></div>
+                    <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
+                </div>
+                <div class="prior-strategy-metrics">
+                    <div><span>${countLabel}</span><strong>${fmtNum(countValue)}</strong></div>
+                    <div><span>Total Units</span><strong>${fmtNum(o.total_units)}</strong></div>
+                    <div><span>Total Cube (ft&sup3;)</span><strong>${fmtCube(o.total_cube)}</strong></div>
+                    <div><span>Total THD Keys</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
+                    <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
+                </div>`;
+            if (result.strategy_summary?.length) {
+                html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
+                for (const s of result.strategy_summary) {
+                    const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
+                    const rowClass = isVendorAligned ? " prior-strategy-detail-row-vendor" : "";
+                    const thdKeysCell = isVendorAligned ? `<span>${fmtNum(s.thd_key_count)} THD Keys</span>` : "";
+                    html += `<div class="prior-strategy-detail-row${rowClass}"><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><strong>${label}</strong>${thdKeysCell}</div>`;
+                }
+                html += `</div>`;
+            }
+            html += `</div>`;
+            section.innerHTML = html;
+            return result;
+        }
+
         $("#btnCheckPriorStrategy")?.addEventListener("click", async () => {
             if (select?.value === "__other__") {
                 toast("Last year's strategy is only available for an existing event", "error");
@@ -342,8 +420,6 @@
             }
             const name = currentEventName();
             const year = yearInput?.value?.trim();
-            const section = $("#priorStrategySection");
-            if (!section) return;
             if (!name || !year) {
                 toast("Enter an event name and year first", "error");
                 return;
@@ -351,62 +427,43 @@
             const isImportVal = document.querySelector('input[name="importToggle"]:checked')?.value;
             showLoading("Checking for a prior year's strategy…");
             try {
-                const params = new URLSearchParams({ event_name: name, event_year: year });
-                if (isImportVal) params.set("is_import", isImportVal);
-                const result = await api(`/api/prior_year_strategy?${params}`);
-                // Stamp the event type used for this lookup onto the result so
-                // Step 2's "Follow last year's strategy?" label can name it
-                // without guessing at whatever Step 1's toggle currently shows
-                // (which could have changed since this fetch ran).
-                lastPriorYearStrategy = result.found ? { ...result, _isImportVal: isImportVal } : null;
-                section.style.display = "block";
-                if (!result.found) {
-                    section.innerHTML = `<p style="margin:0;color:#666;font-size:.85rem">
-                        <i class="fas fa-circle-info"></i> ${name} has no history.</p>`;
-                    return;
-                }
-                const o = result.overall;
-                const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
-                const strategyLabel = isVendorAligned ? "Vendor-Aligned Strategy" : (o.strategy_type || "Strategy Not Recorded");
-                const countLabel = isVendorAligned ? "Suppliers" : "Assortments";
-                // Vendor-aligned rows can list more than one vendor per row (rows
-                // sharing an identical DC list are merged) so the supplier count
-                // is the number of vendor names across all rows, not the row count.
-                const countValue = isVendorAligned
-                    ? (result.strategy_summary || []).reduce((sum, s) => sum + (s.vendor ? s.vendor.split(", ").length : 0), 0)
-                    : (result.strategy_summary?.length || 0);
-                const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
-                let html = `<div class="prior-strategy-card">
-                    <div class="prior-strategy-heading">
-                        <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}${eventTypeLabel ? " " + eventTypeLabel : ""}</span>
-                            <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
-                        <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
-                    </div>
-                    <div class="prior-strategy-metrics">
-                        <div><span>${countLabel}</span><strong>${fmtNum(countValue)}</strong></div>
-                        <div><span>Total Units</span><strong>${fmtNum(o.total_units)}</strong></div>
-                        <div><span>Total Cube (ft&sup3;)</span><strong>${fmtCube(o.total_cube)}</strong></div>
-                        <div><span>Total THD Keys</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
-                        <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
-                    </div>`;
-                if (result.strategy_summary?.length) {
-                    html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
-                    for (const s of result.strategy_summary) {
-                        const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
-                        const rowClass = isVendorAligned ? " prior-strategy-detail-row-vendor" : "";
-                        const thdKeysCell = isVendorAligned ? `<span>${fmtNum(s.thd_key_count)} THD Keys</span>` : "";
-                        html += `<div class="prior-strategy-detail-row${rowClass}"><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><strong>${label}</strong>${thdKeysCell}</div>`;
-                    }
-                    html += `</div>`;
-                }
-                html += `</div>`;
-                section.innerHTML = html;
+                await performPriorYearCheck(name, year, isImportVal);
+                autoPriorYearCheckedFor = `${name}|${year}|${isImportVal}`;
             } catch (e) {
                 toast("Failed to check prior year strategy: " + e.message, "error");
             } finally {
                 hideLoading();
             }
         });
+
+        // Silently runs the same lookup when the user reaches Step 2 without
+        // ever clicking "View Last Year's Strategy" — if there's a matching
+        // prior-year event, Step 2 pre-fills from it just like a manual check
+        // would; if there's no match, this quietly does nothing. Skipped for
+        // a brand-new ("__other__") event, which by definition has no history.
+        triggerAutoPriorYearCheck = async () => {
+            if (select?.value === "__other__") return;
+            const name = currentEventName();
+            const year = yearInput?.value?.trim();
+            if (!name || !year) return;
+            const isImportVal = document.querySelector('input[name="importToggle"]:checked')?.value;
+            const key = `${name}|${year}|${isImportVal}`;
+            if (autoPriorYearCheckedFor === key) return;
+            autoPriorYearCheckedFor = key;
+            priorYearCheckInFlight = true;
+            const nextBtn = $("#btnGoInsert");
+            const nextBtnWasDisabled = nextBtn?.disabled;
+            if (nextBtn) nextBtn.disabled = true;
+            try {
+                await performPriorYearCheck(name, year, isImportVal);
+            } catch (e) {
+                return; // best-effort convenience pre-fill — not worth surfacing an error for
+            } finally {
+                priorYearCheckInFlight = false;
+                if (nextBtn) nextBtn.disabled = nextBtnWasDisabled;
+            }
+            if (currentStep === 2) refreshFollowLastYearUI();
+        };
     }
 
     // ── Section 2: File Upload ─────────────────────────────────────
@@ -716,14 +773,23 @@
     // just because a file passed validation.
     function setupInsert() {
         $("#btnGoInsert")?.addEventListener("click", async () => {
+            if (priorYearCheckInFlight) {
+                toast("Still checking last year's strategy — try Next again in a moment", "error");
+                return;
+            }
             if (!selectedStrategy) {
                 toast("Please select a strategy first", "error");
                 return;
             }
             if (selectedStrategy === "VENDOR_ALIGNED") {
                 if (!vendorStrategyConfirmed) {
-                    toast("Please match and confirm vendor strategies before proceeding", "error");
-                    return;
+                    // Matching already ran automatically once a valid file
+                    // was uploaded (see handleFile) — proceeding past this
+                    // point without an explicit Confirm click just means
+                    // running that same commit now, on the user's behalf,
+                    // rather than blocking them on a click they skipped.
+                    const confirmed = await confirmVendorStrategy();
+                    if (!confirmed) return;
                 }
             } else if (!dataInserted) {
                 const inserted = await doInsert(false);
@@ -731,6 +797,26 @@
             }
             goStep(6);
         });
+    }
+
+    // Shared commit path for Vendor-Aligned: writes the upload to
+    // EVENTS_SKU_LIST (if not already done) and submits SKU-level rows into
+    // DFC_COST_MODEL_SUBMISSION. Used by the explicit "Confirm Vendor
+    // Strategies" button and by Step 2's Next button when the user proceeds
+    // without clicking Confirm themselves. Returns whether it succeeded.
+    async function confirmVendorStrategy() {
+        if (!dataInserted) {
+            const inserted = await doInsert(false);
+            if (!inserted) return false;
+        }
+        const submitted = await submitCostModel();
+        if (!submitted) return false;
+        vendorStrategyConfirmed = true;
+        $("#btnConfirmVendorStrategy").disabled = true;
+        $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
+        toast("Vendor strategies confirmed", "success");
+        renderVendorPieChart(vendorMatches);
+        return true;
     }
 
     async function doInsert(overwrite) {
@@ -784,10 +870,15 @@
     async function loadCostModelPreview() {
         if (!eventName) return;
         try {
+            await ensureVendorMatchesFresh();
+            // vendorMatches makes this a true preview of the row set
+            // /api/submit_cost_model would actually insert into
+            // DFC_COST_MODEL_SUBMISSION (target_dc_count/dc_inclusions/
+            // dc_exclusions included) rather than a looser approximation.
             const result = await api("/api/cost_model_preview", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ event_name: eventName }),
+                body: JSON.stringify({ event_name: eventName, vendor_matches: vendorMatches }),
             });
             if (result.error) return;
 
@@ -835,7 +926,12 @@
             tbody.innerHTML = "";
             for (const r of result.rows) {
                 const tr = document.createElement("tr");
-                tr.innerHTML = `<td>${r.sku_nbr}</td><td style="text-align:right">${Number(r.buy_qty).toLocaleString()}</td><td>${r.IS_SISTER_SKU_FLAG ? "Sister" : "THD"}</td>`;
+                tr.innerHTML = `<td>${r.sku_nbr}</td>`
+                    + `<td style="text-align:right">${Number(r.buy_qty).toLocaleString()}</td>`
+                    + `<td>${r.target_dc_count ?? "—"}</td>`
+                    + `<td>${r.dc_inclusions ?? "—"}</td>`
+                    + `<td>${r.dc_exclusions ?? "—"}</td>`
+                    + `<td>${r.IS_SISTER_SKU_FLAG ? "Sister" : "THD"}</td>`;
                 tbody.appendChild(tr);
             }
             $("#costModelPreview").style.display = "block";
@@ -864,7 +960,7 @@
     function setupAsmtTool() {
         $("#btnSubmitCostModel")?.addEventListener("click", submitCostModel);
         $("#btnDownloadCostModel")?.addEventListener("click", downloadCostModelCsv);
-        $("#btnDeleteCostModel")?.addEventListener("click", deleteCostModelSubmission);
+        $("#btnDeleteCostModel")?.addEventListener("click", () => deleteCostModelSubmission());
         $("#btnRunAsmtTool")?.addEventListener("click", () => {
             window.open("https://dashboard-edw.homedepot.com/workflow/jobDetail?id=1d262d53-4868-41e3-90d2-f67d08d45f29", "_blank");
             $("#btnGoStrategyFromTool").disabled = false;
@@ -878,6 +974,11 @@
     async function submitCostModel() {
         showLoading("Submitting to DFC Cost Model…");
         try {
+            // matchVendorStrategy() shows/hides its own loading state when it
+            // actually has to run — restore ours afterward so the overlay
+            // doesn't drop out from under the submit that's still pending.
+            await ensureVendorMatchesFresh();
+            showLoading("Submitting to DFC Cost Model…");
             const resp = await fetch("/api/submit_cost_model", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -891,18 +992,27 @@
             const result = await resp.json();
             if (!resp.ok || result.error) throw new Error(result.error || "Submission failed");
 
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+            const passBadge = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> ${result.message}
             </div>`;
+            $("#costModelStatus").innerHTML = passBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = true;
+            $("#btnDeleteVendorCostModel").style.display = "none";
             $("#btnRunAsmtTool").style.display = "inline-flex";
             $("#btnRunAsmtTool").disabled = false;
             toast("Cost model submission complete", "success");
             return true;
         } catch (e) {
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
+            const failBadge = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
                 <i class="fas fa-times-circle"></i> ${e.message}
             </div>`;
+            $("#costModelStatus").innerHTML = failBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
+            // Surface the delete option inline wherever this error happened,
+            // so the user isn't forced to hunt for it in a different step.
+            const alreadySubmitted = /already been submitted/i.test(e.message);
+            $("#btnDeleteVendorCostModel").style.display = alreadySubmitted ? "inline-flex" : "none";
             toast("Submission failed: " + e.message, "error");
             return false;
         } finally {
@@ -910,9 +1020,12 @@
         }
     }
 
-    async function deleteCostModelSubmission() {
-        if (!eventName) { toast("No event loaded", "error"); return; }
-        if (!confirm(`Delete all previous cost model submissions for "${eventName}"?`)) return;
+    // `silent` skips this function's own confirm dialog and success toast —
+    // used by replacePreviousUpload(), which already confirmed with the user
+    // and reports its own toast once the resubmit that follows also succeeds.
+    async function deleteCostModelSubmission(silent = false) {
+        if (!eventName) { toast("No event loaded", "error"); return false; }
+        if (!silent && !confirm(`Delete all previous cost model submissions for "${eventName}"?`)) return false;
         showLoading("Deleting previous submission…");
         try {
             const resp = await fetch("/api/delete_cost_model", {
@@ -922,18 +1035,50 @@
             });
             const result = await resp.json();
             if (!resp.ok || result.error) throw new Error(result.error || "Delete failed");
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+            const passBadge = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> ${result.message}
             </div>`;
+            $("#costModelStatus").innerHTML = passBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = false;
-            toast("Previous submission deleted", "success");
+            $("#btnDeleteVendorCostModel").style.display = "none";
+            // Let the user resubmit through the vendor-aligned confirm flow too.
+            vendorStrategyConfirmed = false;
+            if ($("#btnConfirmVendorStrategy")) {
+                $("#btnConfirmVendorStrategy").disabled = false;
+                $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check"></i> Confirm Vendor Strategies';
+            }
+            if (!silent) toast("Previous submission deleted", "success");
+            return true;
         } catch (e) {
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
+            const failBadge = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
                 <i class="fas fa-times-circle"></i> ${e.message}
             </div>`;
+            $("#costModelStatus").innerHTML = failBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
             toast("Delete failed: " + e.message, "error");
+            return false;
         } finally {
             hideLoading();
+        }
+    }
+
+    // Full "Replace Previous Upload" action for the vendor-aligned flow:
+    // deletes the prior DFC_COST_MODEL_SUBMISSION rows for this event and
+    // immediately resubmits the current upload in their place, so the
+    // replacement is complete in one click rather than deferring the
+    // resubmit to whenever the user next hits Confirm/Next.
+    async function replacePreviousUpload() {
+        if (!eventName) { toast("No event loaded", "error"); return; }
+        if (!confirm(`Delete the previous cost model submission for "${eventName}" and upload the current data in its place?`)) return;
+        const deleted = await deleteCostModelSubmission(true);
+        if (!deleted) return;
+        const submitted = await submitCostModel();
+        if (submitted) {
+            vendorStrategyConfirmed = true;
+            $("#btnConfirmVendorStrategy").disabled = true;
+            $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
+            toast("Previous submission replaced with current upload", "success");
         }
     }
 
@@ -1056,20 +1201,34 @@
         // Vendor-Aligned: it writes this upload to EVENTS_SKU_LIST (deferred
         // until now, not automatic at upload time) and then submits SKU-level
         // rows into DFC_COST_MODEL_SUBMISSION, so a strategy isn't
-        // "confirmed" unless both of those actually went through.
-        $("#btnConfirmVendorStrategy")?.addEventListener("click", async () => {
-            if (!dataInserted) {
-                const inserted = await doInsert(false);
-                if (!inserted) return;
-            }
-            const submitted = await submitCostModel();
-            if (!submitted) return;
-            vendorStrategyConfirmed = true;
-            $("#btnConfirmVendorStrategy").disabled = true;
-            $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
-            toast("Vendor strategies confirmed", "success");
-            renderVendorPieChart(vendorMatches);
+        // "confirmed" unless both of those actually went through. Shared with
+        // Step 2's Next button, which runs this same commit automatically if
+        // the user proceeds without clicking Confirm themselves.
+        $("#btnConfirmVendorStrategy")?.addEventListener("click", confirmVendorStrategy);
+        $("#btnDeleteVendorCostModel")?.addEventListener("click", replacePreviousUpload);
+
+        // Add Vendor Strategy — writes a new row straight into
+        // VENDOR_ALIGNED_STRATEGY (ASMT_ID left null; it's only known once
+        // the assortment tool has run for this vendor's DC group), then
+        // re-runs matching so this event's suppliers pick it up immediately.
+        $("#btnShowAddVendorStrategy")?.addEventListener("click", () => {
+            pickedVendorStrategyDcs = new Set();
+            renderVendorStrategyDcPicker();
+            renderAddVendorStrategyNameOptions();
+            $("#addVendorStrategyForm").style.display = "block";
         });
+        $("#btnCancelAddVendorStrategy")?.addEventListener("click", () => {
+            $("#addVendorStrategyForm").style.display = "none";
+        });
+        $("#newVendorStrategyName")?.addEventListener("change", () => {
+            const isOther = $("#newVendorStrategyName").value === "__other__";
+            const custom = $("#newVendorStrategyNameCustom");
+            if (custom) {
+                custom.style.display = isOther ? "block" : "none";
+                if (isOther) custom.focus();
+            }
+        });
+        $("#btnSaveVendorStrategy")?.addEventListener("click", saveVendorStrategy);
 
         // Load DC counts button
         $("#btnLoadDcCounts")?.addEventListener("click", loadAvailableDcCounts);
@@ -1342,6 +1501,85 @@
         }
     }
 
+    let pickedVendorStrategyDcs = new Set();
+
+    function renderVendorStrategyDcPicker() {
+        const el = $("#newVendorStrategyDcPicker");
+        if (!el) return;
+        el.innerHTML = ALL_DCS.map(dc => {
+            const active = pickedVendorStrategyDcs.has(dc.nbr);
+            return `<button type="button" class="dc-toggle-btn vendor-dc-btn${active ? " active" : ""}"
+                data-dc-nbr="${dc.nbr}" title="${dc.name}">${dc.nbr}</button>`;
+        }).join("");
+        el.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+            const dc = Number(b.dataset.dcNbr);
+            pickedVendorStrategyDcs.has(dc) ? pickedVendorStrategyDcs.delete(dc) : pickedVendorStrategyDcs.add(dc);
+            renderVendorStrategyDcPicker();
+        }));
+    }
+
+    // Populates the "Add Vendor Strategy" name field from this upload's
+    // distinct suppliers (vendorMatches) instead of free text, so a new
+    // strategy always attaches to a real supplier on the current event.
+    // Each option is labeled with the VENDOR_ALIGNED_STRATEGY name it
+    // currently resolves to (often "OTHER") and flagged with ⚠ when it's
+    // only getting the generic fallback — so a supplier like "ALLEY CAT"
+    // that has no dedicated strategy yet is easy to pick out and fix.
+    function renderAddVendorStrategyNameOptions() {
+        const select = $("#newVendorStrategyName");
+        const custom = $("#newVendorStrategyNameCustom");
+        if (!select) return;
+        const seen = new Set();
+        const options = vendorMatches
+            .map(m => ({ supplier: (m.SUPPLIER || "").trim(), current: (m.VENDOR || "OTHER").toUpperCase() }))
+            .filter(o => o.supplier && !seen.has(o.supplier) && seen.add(o.supplier))
+            .sort((a, b) => a.supplier.localeCompare(b.supplier));
+        select.innerHTML = `<option value="">Select a supplier from this upload…</option>`
+            + options.map(o => `<option value="${o.supplier}">${o.current === "OTHER" ? "⚠ " : ""}${o.supplier} — currently: ${o.current}</option>`).join("")
+            + `<option value="__other__">+ Enter a different vendor name…</option>`;
+        select.value = "";
+        if (custom) { custom.style.display = "none"; custom.value = ""; }
+    }
+
+    async function saveVendorStrategy() {
+        const select = $("#newVendorStrategyName");
+        const isOther = select?.value === "__other__";
+        const name = (isOther ? $("#newVendorStrategyNameCustom")?.value : select?.value || "").trim();
+        if (!name) { toast("Select or enter a vendor name", "error"); return; }
+        if (!pickedVendorStrategyDcs.size) { toast("Select at least one DC", "error"); return; }
+        showLoading("Adding vendor strategy…");
+        try {
+            const result = await api("/api/vendor_strategy/add", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ vendor: name, dc_list: [...pickedVendorStrategyDcs] }),
+            });
+            toast(result.message || `Added ${name.toUpperCase()}`, "success");
+            $("#addVendorStrategyForm").style.display = "none";
+            pickedVendorStrategyDcs = new Set();
+            // Re-run matching so this event's suppliers (including ones
+            // currently falling back to OTHER) pick up the new vendor row.
+            await matchVendorStrategy();
+        } catch (e) {
+            toast("Failed to add vendor strategy: " + e.message, "error");
+        } finally {
+            hideLoading();
+        }
+    }
+
+    // Guards submitCostModel()/loadCostModelPreview() against ever sending an
+    // empty vendor_matches for a Vendor-Aligned event — that's exactly what
+    // makes target_dc_count/dc_inclusions/dc_exclusions come back null, since
+    // the backend can't tell "no vendor-aligned assignments exist" apart from
+    // "this event isn't vendor-aligned." vendorMatches only ever gets
+    // populated by matchVendorStrategy(), so if it's empty here re-run it
+    // rather than submit/preview against stale or never-fetched matches.
+    async function ensureVendorMatchesFresh() {
+        if (selectedStrategy === "VENDOR_ALIGNED" && !vendorMatches.length) {
+            await matchVendorStrategy();
+        }
+    }
+
     async function matchVendorStrategy() {
         showLoading("Matching suppliers to vendor strategies…");
         try {
@@ -1461,7 +1699,7 @@
                 <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
             result.rows.forEach(row => {
                 const selectedDcs = vendorSkuDcs(match, row);
-                html += `<tr><td><div class="vendor-dc-buttons">
+                html += `<tr data-sku-key="${row.THD_SKU_NBR}"><td><div class="vendor-dc-buttons">
                     ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
                         dataAttrs: ` data-sku-key="${row.THD_SKU_NBR}"`,
@@ -1491,6 +1729,49 @@
         }
     }
 
+    // Repaints one already-rendered SKU row's DC buttons/count/override badge
+    // in place, without a network round trip. THD_SKU_NBR/SKU_DESC/units/cube
+    // don't change when a DC override is toggled — only the client-side
+    // SKU_OVERRIDES state does — so there's nothing here that
+    // /api/vendor_skus needs to be asked about again, unlike the initial page
+    // load or paging to a different set of SKUs.
+    function rerenderVendorSkuRow(matchIndex, skuKey) {
+        const match = vendorMatches[matchIndex];
+        const container = $(`#vendor-skus-${matchIndex}`);
+        if (!match || !container) return;
+        const row = container.querySelector(`tr[data-sku-key="${CSS.escape(String(skuKey))}"]`);
+        if (!row) return;
+
+        const defaultDcs = parseVendorDcs(match.DC_LIST);
+        const names = parseVendorNames(match._initialDcNames);
+        const selectedDcs = parseVendorDcs(match.SKU_OVERRIDES[skuKey] || match.DC_LIST);
+
+        const btnCell = row.querySelector(".vendor-dc-buttons");
+        if (btnCell) {
+            btnCell.innerHTML = renderDcButtonGrid(matchIndex, defaultDcs, names, selectedDcs, {
+                extraClass: " vendor-sku-dc-btn",
+                dataAttrs: ` data-sku-key="${skuKey}"`,
+            });
+            btnCell.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
+                button.addEventListener("click", () => toggleVendorSkuDc(
+                    Number(button.dataset.matchIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
+                ));
+            });
+        }
+
+        const overrideHolder = btnCell?.parentElement;
+        const existingBadge = overrideHolder?.querySelector(".vendor-sku-override");
+        const hasOverride = !!match.SKU_OVERRIDES[skuKey];
+        if (hasOverride && !existingBadge) {
+            overrideHolder.insertAdjacentHTML("beforeend", '<span class="vendor-sku-override">Override</span>');
+        } else if (!hasOverride && existingBadge) {
+            existingBadge.remove();
+        }
+
+        const countCell = row.querySelector(".vendor-sku-count");
+        if (countCell) countCell.textContent = selectedDcs.length;
+    }
+
     function toggleVendorSkuDc(matchIndex, skuKey, dcNbr) {
         const match = vendorMatches[matchIndex];
         if (!match) return;
@@ -1505,8 +1786,7 @@
         const defaults = parseVendorDcs(match.DC_LIST);
         if (next.join(",") === defaults.join(",")) delete match.SKU_OVERRIDES[skuKey];
         else match.SKU_OVERRIDES[skuKey] = next;
-        const page = Number($(`#vendor-skus-${matchIndex} .vendor-sku-next`)?.dataset.page || 1) - 1 || 1;
-        loadVendorSkuRows(matchIndex, page);
+        rerenderVendorSkuRow(matchIndex, skuKey);
     }
 
     // Per-supplier rollup of the vendor-strategy match: SKU count comes from
@@ -2331,6 +2611,10 @@
             $("#rKpiUnits").textContent = fmtNum(s.total_buy_units);
             $("#rKpiDcs").textContent = fmtNum(s.total_dcs);
             $("#rKpiFactories").textContent = fmtNum(s.unique_factories);
+            // Factory concept doesn't exist for a domestic event — show the
+            // KPI card only for imports rather than a confusing "0".
+            const factoriesCard = $("#rKpiFactoriesCard");
+            if (factoriesCard) factoriesCard.style.display = includesImports ? "" : "none";
         } catch (e) {
             console.error("KPI error:", e);
         }
@@ -2353,10 +2637,20 @@
         }
     }
 
+    // FACTORY_ID doesn't exist for a domestic event (factories are an
+    // import-only concept) — includesImports is set back in Step 1 and
+    // carried through as the one source of truth for that, rather than
+    // inferring it from whatever happens to come back in a given page of
+    // results.
+    function getVisibleResultColumns() {
+        return includesImports ? RESULT_COLUMNS : RESULT_COLUMNS.filter(c => c.key !== "FACTORY_ID");
+    }
+
     function renderResultsTable(data) {
+        const visibleColumns = getVisibleResultColumns();
         const headRow = $("#resultsHead");
         headRow.innerHTML = "";
-        for (const col of RESULT_COLUMNS) {
+        for (const col of visibleColumns) {
             const th = document.createElement("th");
             th.textContent = col.label;
             th.dataset.col = col.key;
@@ -2373,12 +2667,12 @@
         const tbody = $("#resultsBody");
         tbody.innerHTML = "";
         if (!data.length) {
-            tbody.innerHTML = `<tr><td colspan="${RESULT_COLUMNS.length}" style="text-align:center;color:#666;padding:30px">No results</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="${visibleColumns.length}" style="text-align:center;color:#666;padding:30px">No results</td></tr>`;
             return;
         }
         for (const row of data) {
             const tr = document.createElement("tr");
-            for (const col of RESULT_COLUMNS) {
+            for (const col of visibleColumns) {
                 const td = document.createElement("td");
                 td.textContent = fmtCell(row[col.key], col.fmt);
                 if (col.fmt === "number" || col.fmt === "pct") {
