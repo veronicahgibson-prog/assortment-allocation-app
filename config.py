@@ -15,6 +15,14 @@ ALLOCATION_PROC = f"`{PROJECT_ID}.{DATASET}.run_dynamic_allocation`"
 VENDOR_ALIGNED_PROC = f"`{PROJECT_ID}.{DATASET}.run_vendor_aligned_allocation`"
 SINGLE_DC_PROC = f"`{PROJECT_ID}.{DATASET}.run_single_dc_allocation`"
 MULTI_DC_PROC = f"`{PROJECT_ID}.{DATASET}.run_multi_dc_allocation`"
+
+# OBC weekly cost-model pipeline (formerly three manual notebook/dashboard
+# steps — see _run_obc_pipeline in app.py): pre-processing/safety-stock,
+# per-wave/batch outbound cost computation, then post-processing.
+OBC_RUN_KEYS_VIEW = f"`{PROJECT_ID}.{DATASET}.OBC_V_CTLG_LATEST_WEEKLY_RUN_KEYS`"
+OBC_PRE_PROC = f"`{PROJECT_ID}.{DATASET}.OBC_P_CTLG_WEEKLY_RUN_PRE`"
+OBC_POST_PROC = f"`{PROJECT_ID}.{DATASET}.OBC_P_CTLG_WEEKLY_RUN_POST`"
+OBC_COST_BATCH_PROC = f"`{PROJECT_ID}.{DATASET}.OBC_P_COST_OB_BATCH`"
 FINAL_ALLOCATIONS = f"`{PROJECT_ID}.{TEMP_DATASET}.FINAL_ALLOCATIONS_WIDE`"
 UNALLOCATED_RECORDS = f"`{PROJECT_ID}.{TEMP_DATASET}.UNALLOCATED_RECORDS`"
 FACTORY_UTILIZATION = f"`{PROJECT_ID}.{TEMP_DATASET}.FACTORY_UTILIZATION`"

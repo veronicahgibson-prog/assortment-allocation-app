@@ -11,5 +11,10 @@ credentials/
 # Local diagnostic scripts are not part of the deployed app.
 debug_*.py
 diag_*.py
+*_tmp.py
+*_tmp.sql
+
+# Local server run logs.
+*.log
 
 .DS_Store

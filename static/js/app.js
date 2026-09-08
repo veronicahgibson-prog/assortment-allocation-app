@@ -68,6 +68,22 @@
         { key: "FACTORY_CONTAINERS", label: "Fac Cont", fmt: "number" },
     ];
 
+    // Display labels for whichever extra column(s) _determine_thd_key (server side)
+    // adds beyond THD_SKU_NBR to make an upload's rows distinct — surfaced in the
+    // merged-SKU detail rows in Step 3. Falls back to the raw column name for one
+    // not listed here.
+    const KEY_FIELD_LABELS = {
+        MVNDR_NBR: "MVNDR",
+        FACTORY_ID: "Factory",
+        SUPPLIER: "Supplier",
+        BP: "BP",
+        WAVE_1: "Wave 1",
+        WAVE_2: "Wave 2",
+        WAVE_3: "Wave 3",
+        WAVE_4: "Wave 4",
+        WAVE_5: "Wave 5",
+    };
+
     // ── Formatters ─────────────────────────────────────────────────
     function fmtNum(v) {
         return v == null ? "—" : Number(v).toLocaleString("en-US");
@@ -193,6 +209,11 @@
 
         // Load cost model preview when arriving at step 6
         if (n === 6) loadCostModelPreview();
+
+        // Resume watching the OBC pipeline if it's already running (e.g. it
+        // was started earlier and this is a fresh page load) rather than
+        // requiring another click on "Run Assortment Tool" just to see status.
+        if (n === 6 && !obcPollTimer) pollObcPipelineStatus();
 
         // Auto-load results when going to the Allocation step
         if (n === 8) loadResults();
@@ -388,7 +409,7 @@
             let html = `<div class="prior-strategy-card">
                 <div class="prior-strategy-heading">
                     <div><span class="prior-strategy-kicker">${strategyLabel}</span>
-                        <h4><i class="fas fa-calendar-days"></i> ${result.event_name} <span style="color:var(--hd-orange)">${result.event_year}</span>${eventTypeLabel ? " " + eventTypeLabel : ""}</h4></div>
+                        <h4><i class="fas fa-calendar-days"></i> <span style="color:var(--hd-orange)">${result.event_year}</span> ${result.event_name}${eventTypeLabel ? " " + eventTypeLabel : ""}</h4></div>
                     <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
                 </div>
                 <div class="prior-strategy-metrics">
@@ -947,14 +968,27 @@
             if (mergedPanel) {
                 mergedPanel.style.display = mergedSkus.length ? "block" : "none";
                 if (mergedSkus.length) {
-                    $("#mergedSkusSummary").textContent = `${mergedSkus.length} SKU${mergedSkus.length === 1 ? "" : "s"} merged`;
+                    $("#mergedSkusSummary").textContent =
+                        `${mergedSkus.length} SKU${mergedSkus.length === 1 ? "" : "s"} merged & units aggregated`;
+                    // The extra field(s) beyond THD_SKU_NBR that _determine_thd_key (server side)
+                    // needed to make every uploaded row distinct — dynamic because it depends on
+                    // what this particular upload actually collides on (e.g. MVNDR_NBR when the
+                    // same THD SKU is sourced from more than one vendor).
+                    const extraFields = result.thd_key_extra_fields || [];
                     $("#mergedSkusBody").innerHTML = mergedSkus.map(m => {
-                        const sourceRows = m.sources.map(s =>
-                            `<div style="padding:4px 0;border-top:1px solid #ffe8a1">`
-                            + `THD ${s.thd_sku_nbr ?? "—"}${s.sister_sku_nbr ? ` / Sister ${s.sister_sku_nbr}` : ""} `
-                            + `— ${s.sku_desc || "—"} (${fmtNum(s.buy_units)} units${s.is_sister ? ", sister-sourced" : ""})`
-                            + `</div>`
-                        ).join("");
+                        const sourceRows = m.sources.map(s => {
+                            const extraParts = extraFields.map(f =>
+                                `${KEY_FIELD_LABELS[f] || f} ${s.key_fields?.[f] ?? "—"}`);
+                            const detail = [
+                                `THD ${s.thd_sku_nbr ?? "—"}`,
+                                `Sister ${s.sister_sku_nbr ?? "—"}`,
+                                s.sku_desc || "—",
+                                ...extraParts,
+                            ].join(" · ");
+                            return `<div style="padding:4px 0;border-top:1px solid #ffe8a1">`
+                                + `${detail} (${fmtNum(s.buy_units)} units${s.is_sister ? ", sister-sourced" : ""})`
+                                + `</div>`;
+                        }).join("");
                         return `<div style="margin-bottom:8px"><strong>SKU ${m.sku_nbr}</strong> — ${m.sources.length} uploaded rows${sourceRows}</div>`;
                     }).join("");
                 }
@@ -1015,14 +1049,77 @@
         $("#btnSubmitCostModel")?.addEventListener("click", submitCostModel);
         $("#btnDownloadCostModel")?.addEventListener("click", downloadCostModelCsv);
         $("#btnDeleteCostModel")?.addEventListener("click", () => deleteCostModelSubmission());
-        $("#btnRunAsmtTool")?.addEventListener("click", () => {
-            window.open("https://dashboard-edw.homedepot.com/workflow/jobDetail?id=1d262d53-4868-41e3-90d2-f67d08d45f29", "_blank");
-            $("#btnGoStrategyFromTool").disabled = false;
-            $("#asmtToolStatus").style.display = "block";
-            $("#asmtToolStatus").innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
-                <i class="fas fa-check-circle"></i> Assortment tool launched. Proceed when run completes.
+        $("#btnRunAsmtTool")?.addEventListener("click", startObcPipeline);
+    }
+
+    // ── OBC weekly pipeline (pre-processing → outbound cost → post-processing) ──
+    // Replaces the old "open the dashboard and babysit it yourself" link with an
+    // in-app trigger + poll loop — the pipeline itself runs server-side in a
+    // background thread (it's documented to take "likely a few hours" once
+    // outbound cost needs to run), so this just starts it and checks back
+    // periodically rather than blocking on it.
+    let obcPollTimer = null;
+
+    function renderObcPipelineStatus(state) {
+        const el = $("#asmtToolStatus");
+        if (!el) return;
+        $("#btnRunAsmtTool").disabled = state.status === "running";
+
+        const runLine = state.run_id ? ` — Run ${state.run_id}` : "";
+        if (state.status === "running") {
+            el.style.display = "block";
+            const stageLabel = {
+                pre: "Running pre-processing / safety stock calc…",
+                outbound_cost: `Calculating outbound costs${state.wave_progress ? ` (wave ${state.wave_progress})` : ""}…`,
+                post: "Running post-processing — determining group/SKU recommendations…",
+            }[state.stage] || "Running…";
+            el.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+                <i class="fas fa-spinner fa-spin"></i> ${stageLabel}${runLine}
             </div>`;
-        });
+        } else if (state.status === "done") {
+            el.style.display = "block";
+            el.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+                <i class="fas fa-check-circle"></i> Assortment tool complete${runLine}.
+            </div>`;
+        } else if (state.status === "error") {
+            el.style.display = "block";
+            el.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
+                <i class="fas fa-times-circle"></i> Assortment tool failed: ${state.error}
+            </div>`;
+        } else {
+            el.style.display = "none"; // idle — nothing to show yet
+        }
+    }
+
+    async function pollObcPipelineStatus() {
+        try {
+            const state = await api("/api/obc_pipeline/status");
+            renderObcPipelineStatus(state);
+            obcPollTimer = state.status === "running" ? setTimeout(pollObcPipelineStatus, 15000) : null;
+        } catch (e) {
+            // A transient network hiccup shouldn't kill hours of polling —
+            // just try again on the same interval.
+            obcPollTimer = setTimeout(pollObcPipelineStatus, 15000);
+        }
+    }
+
+    async function startObcPipeline() {
+        $("#btnRunAsmtTool").disabled = true;
+        try {
+            const result = await api("/api/obc_pipeline/start", { method: "POST" });
+            if (result.error) throw new Error(result.error);
+            toast("Assortment tool pipeline started", "success");
+        } catch (e) {
+            // Already running (409) is fine — just resume watching it instead
+            // of treating it as a failure to start.
+            if (!/already running/i.test(e.message)) {
+                toast("Failed to start assortment tool: " + e.message, "error");
+                $("#btnRunAsmtTool").disabled = false;
+                return;
+            }
+        }
+        if (obcPollTimer) clearTimeout(obcPollTimer);
+        pollObcPipelineStatus();
     }
 
     async function submitCostModel() {

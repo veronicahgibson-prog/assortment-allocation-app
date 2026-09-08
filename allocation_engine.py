@@ -112,6 +112,20 @@ def fetch_available_dc_counts(client: bigquery.Client, run_id: str, sku_grp: str
         return {"success": False, "error": str(e)}
 
 
+def is_import_run(client: bigquery.Client) -> bool:
+    """Whether the current FINAL_ALLOCATIONS_WIDE run has any real FACTORY_ID —
+    a domestic run leaves it null/0 throughout, since factories are an
+    import-only concept. FACTORY_CUBE/FACTORY_CONTAINERS are meaningless
+    (a bogus sum across every domestic row treated as one factory group)
+    whenever this is false, so callers should skip them in that case."""
+    q = f"""
+        SELECT COUNTIF(FACTORY_ID IS NOT NULL AND FACTORY_ID != 0) > 0 AS is_import
+        FROM {FINAL_ALLOCATIONS}
+    """
+    rows = list(client.query(q).result())
+    return bool(rows and rows[0]["is_import"])
+
+
 def fetch_results(client: bigquery.Client, page: int = 1, page_size: int = 50,
                   sort: str = "SKU_NBR", direction: str = "ASC") -> dict:
     """Fetch allocation results from FINAL_ALLOCATIONS_WIDE."""
@@ -134,6 +148,8 @@ def fetch_results(client: bigquery.Client, page: int = 1, page_size: int = 50,
     count_q = f"SELECT COUNT(*) AS cnt FROM {FINAL_ALLOCATIONS}"
     total = list(client.query(count_q).result())[0]["cnt"]
 
+    factory_totals = "FACTORY_CUBE, FACTORY_CONTAINERS" if is_import_run(client) else \
+        "CAST(NULL AS FLOAT64) AS FACTORY_CUBE, CAST(NULL AS FLOAT64) AS FACTORY_CONTAINERS"
     query = f"""
         SELECT SKU_NBR, SKU_DESC,
                SUPPLIER, FACTORY_ID,
@@ -141,7 +157,7 @@ def fetch_results(client: bigquery.Client, page: int = 1, page_size: int = 50,
                DC_NBR,
                DFC_PCT, DFC_UNITS, DFC_W1_UNITS, DFC_W2_UNITS,
                DFC_W3_UNITS, DFC_W4_UNITS,
-               ITEM_CUBE, RACK_TYPE, FACTORY_CUBE, FACTORY_CONTAINERS
+               ITEM_CUBE, RACK_TYPE, {factory_totals}
         FROM {FINAL_ALLOCATIONS}
         ORDER BY {sort} {direction}
         LIMIT @limit OFFSET @offset
@@ -160,11 +176,12 @@ def fetch_results(client: bigquery.Client, page: int = 1, page_size: int = 50,
 
 def fetch_summary(client: bigquery.Client) -> dict:
     """Fetch KPI summary from allocation results."""
-    # SKU_NBR is the THD key here (no separate MVNDR_NBR column on this table —
-    # see the note in fetch_results).
+    # A single SKU_NBR can carry multiple THD_KEY_ID rows (e.g. two vendor-aligned
+    # sourcing paths for the same retail SKU), so THD_KEY_ID — not SKU_NBR — is
+    # the true per-record partition key on this table.
     query = f"""
         SELECT
-            COUNT(DISTINCT SKU_NBR) AS total_skus,
+            COUNT(DISTINCT THD_KEY_ID) AS total_skus,
             COALESCE(SUM(DFC_UNITS), 0) AS total_buy_units,
             COUNT(DISTINCT DC_NBR) AS total_dcs,
             COUNT(DISTINCT FACTORY_ID) AS unique_factories
@@ -217,19 +234,25 @@ def validate_results(client: bigquery.Client) -> list[dict]:
     except Exception as e:
         checks.append({"name": "No negative allocations", "passed": False, "detail": str(e)})
 
-    # 4. DFC_PCT sums to ~1.0 per SKU
+    # 4. DFC_PCT sums to ~1.0 per THD_KEY_ID (partition by THD_KEY_ID, not
+    # SKU_NBR — a SKU_NBR can legitimately carry more than one THD_KEY_ID,
+    # each independently allocated to 100%)
     q4 = f"""
-        SELECT SKU_NBR, ABS(SUM(DFC_PCT) - 1.0) AS pct_diff
+        SELECT THD_KEY_ID, ANY_VALUE(SKU_NBR) AS SKU_NBR, ABS(SUM(DFC_PCT) - 1.0) AS pct_diff
         FROM {FINAL_ALLOCATIONS}
-        GROUP BY SKU_NBR
+        GROUP BY THD_KEY_ID
         HAVING ABS(SUM(DFC_PCT) - 1.0) > 0.01
     """
     try:
-        r4 = len(list(client.query(q4).result()))
+        r4_rows = list(client.query(q4).result())
+        r4 = len(r4_rows)
+        bad_skus = ", ".join(str(row["SKU_NBR"]) for row in r4_rows[:10])
+        if r4 > 10:
+            bad_skus += f", +{r4 - 10} more"
         checks.append({
             "name": "DFC_PCT sums to 1.0 per SKU",
             "passed": r4 == 0,
-            "detail": f"{r4} SKU(s) outside tolerance" if r4 > 0 else "Pass",
+            "detail": f"{r4} THD key(s) outside tolerance: {bad_skus}" if r4 > 0 else "Pass",
         })
     except Exception as e:
         checks.append({"name": "DFC_PCT sums to 1.0", "passed": False, "detail": str(e)})

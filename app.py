@@ -6,6 +6,7 @@ import io
 import re
 import math
 import datetime
+import threading
 
 import pandas as pd
 from flask import Flask, render_template, jsonify, request, send_file
@@ -21,10 +22,11 @@ from config import (
     TEMPLATE_COLUMNS_DOMESTIC, TEMPLATE_COLUMNS_IMPORT,
     CONTAINER_DIVISOR, STRATEGY_KEYS, MAX_UPLOAD_MB,
     ALLOWED_DFCS, DC_NAMES, CATALOG_RUN_ANALYTICS,
+    OBC_RUN_KEYS_VIEW, OBC_PRE_PROC, OBC_POST_PROC, OBC_COST_BATCH_PROC,
 )
 from validators import validate_upload, _determine_thd_key
 from assortment_engine import determine_assortment_ids, start_multi_dc, fetch_multi_dc_results
-from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_factory_summary
+from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_factory_summary, is_import_run
 from event_history import fetch_prior_year_strategy, fetch_known_event_names
 
 app = Flask(__name__)
@@ -1231,12 +1233,24 @@ def api_cost_model_preview():
         # second look are worth showing.
         raw_q = f"""
             SELECT CAST(SKU_NBR AS STRING) AS sku_nbr, THD_SKU_NBR, SISTER_SKU_NBR,
-                   SKU_DESC, BUY_UNITS, IS_SISTER_SKU_FLAG
+                   SKU_DESC, BUY_UNITS, IS_SISTER_SKU_FLAG,
+                   MVNDR_NBR, FACTORY_ID, SUPPLIER, BP
             FROM {EVENTS_SKU_LIST}
             WHERE EVENT_NAME = @ev
         """
         raw_rows = [dict(r) for r in bq().query(raw_q, job_config=jc).result()]
         uploaded_row_count = len(raw_rows)
+
+        # Same composite-key algorithm the upload step used to make every row
+        # distinct (_determine_thd_key) — reused here so a "merge" always shows
+        # exactly the field(s) that differentiate the underlying records, not a
+        # fixed guess. THD_SKU_NBR is always the first column it returns. Its
+        # WAVE_1..5 candidates are the raw upload's column names (pre-insert),
+        # which EVENTS_SKU_LIST stores as W1_UNITS..W5_UNITS, so they're never
+        # selected here — never picked as a key column against this table.
+        includes_imports = bool(_resolve_is_import(event_name, default=False))
+        key_cols = _determine_thd_key(pd.DataFrame(raw_rows), includes_imports) if raw_rows else ["THD_SKU_NBR"]
+        extra_key_cols = [c for c in key_cols if c != "THD_SKU_NBR"]
 
         rows_by_sku = {}
         for r in raw_rows:
@@ -1252,6 +1266,7 @@ def api_cost_model_preview():
                         "sku_desc": src["SKU_DESC"],
                         "buy_units": src["BUY_UNITS"],
                         "is_sister": src["IS_SISTER_SKU_FLAG"],
+                        "key_fields": {c: src.get(c) for c in extra_key_cols},
                     }
                     for src in group
                 ],
@@ -1335,6 +1350,7 @@ def api_cost_model_preview():
                 "sister_sourced_count": len(sister_sourced_skus),
             },
             "merged_skus": merged_skus,
+            "thd_key_extra_fields": extra_key_cols,
             "sister_sourced_skus": sister_sourced_skus,
         })
     except Exception as e:
@@ -1556,6 +1572,130 @@ def api_delete_cost_model():
     except Exception as e:
         logger.exception("delete_cost_model error")
         return jsonify({"error": str(e)}), 500
+
+
+# ── OBC Weekly Cost-Model Pipeline ────────────────────────────────
+# Ports the three manual notebook/dashboard steps (pre-processing, per-wave
+# outbound-cost batches, post-processing) into this app so "Run Assortment
+# Tool" actually runs them instead of just linking out to a dashboard the
+# user has to babysit by hand. The batch step alone is documented as taking
+# "likely a few hours," so this always runs in a background thread — never
+# inline in a request — and status is polled rather than awaited.
+#
+# The PRE/POST procs are global (they process whatever's pending across
+# every event, not just the one that triggered them), so _obc_pipeline_state
+# is deliberately a single shared, server-wide state, not per-event.
+_obc_pipeline_lock = threading.Lock()
+_obc_pipeline_state = {
+    "status": "idle",       # idle | running | done | error
+    "stage": None,          # pre | outbound_cost | post
+    "run_id": None,
+    "fscl_yr_wk": None,
+    "wave_progress": None,  # e.g. "2/3"
+    "started_at": None,
+    "finished_at": None,
+    "error": None,
+}
+
+
+def _run_obc_pipeline():
+    try:
+        with _obc_pipeline_lock:
+            _obc_pipeline_state["stage"] = "pre"
+        bq().query(f"CALL {OBC_PRE_PROC}()").result()
+
+        run_q = f"""
+            SELECT * FROM {OBC_RUN_KEYS_VIEW}
+            ORDER BY WAVE_INDEX ASC, RUN_INDEX ASC
+        """
+        df_run = bq().query(run_q).to_dataframe()
+        if df_run.empty:
+            raise RuntimeError(f"{OBC_RUN_KEYS_VIEW} returned no rows after the PRE proc.")
+        run_id = str(df_run["RUN_ID"].iloc[0])
+        fscl_yr_wk = df_run["FSCL_YR_WK_KEY_VAL"].iloc[0] if "FSCL_YR_WK_KEY_VAL" in df_run.columns else None
+        need_run = bool(df_run["NEED_RUN"].iloc[0])
+
+        with _obc_pipeline_lock:
+            _obc_pipeline_state["run_id"] = run_id
+            _obc_pipeline_state["fscl_yr_wk"] = fscl_yr_wk
+
+        if need_run:
+            with _obc_pipeline_lock:
+                _obc_pipeline_state["stage"] = "outbound_cost"
+            waves = {}
+            for _, row in df_run.iterrows():
+                waves.setdefault(int(row["WAVE_INDEX"]), []).append(int(row["RUN_INDEX"]))
+            wave_keys = sorted(waves.keys())
+            for wi, wave_idx in enumerate(wave_keys, start=1):
+                with _obc_pipeline_lock:
+                    _obc_pipeline_state["wave_progress"] = f"{wi}/{len(wave_keys)}"
+                # Every batch in a wave runs in parallel, each on its own
+                # client (mirroring the source notebook exactly — a single
+                # client isn't meant to have concurrent query() calls issued
+                # against it from multiple in-flight jobs at once), then the
+                # whole wave is awaited before the next one starts.
+                jobs = [
+                    bigquery.Client(project=PROJECT_ID).query(
+                        f"CALL {OBC_COST_BATCH_PROC}('{run_id}', {batch_idx})"
+                    )
+                    for batch_idx in waves[wave_idx]
+                ]
+                for job in jobs:
+                    job.result()
+
+        with _obc_pipeline_lock:
+            _obc_pipeline_state["stage"] = "post"
+        bq().query(f"CALL {OBC_POST_PROC}()").result()
+
+        with _obc_pipeline_lock:
+            _obc_pipeline_state["status"] = "done"
+            _obc_pipeline_state["stage"] = None
+            _obc_pipeline_state["finished_at"] = datetime.datetime.utcnow().isoformat()
+    except Exception as e:
+        logger.exception("OBC weekly pipeline failed")
+        with _obc_pipeline_lock:
+            _obc_pipeline_state["status"] = "error"
+            _obc_pipeline_state["error"] = str(e)
+
+
+@app.route("/api/obc_pipeline/start", methods=["POST"])
+def api_obc_pipeline_start():
+    with _obc_pipeline_lock:
+        if _obc_pipeline_state["status"] == "running":
+            return jsonify({"error": "The OBC weekly pipeline is already running."}), 409
+        _obc_pipeline_state.update({
+            "status": "running", "stage": "pre", "run_id": None, "fscl_yr_wk": None,
+            "wave_progress": None, "started_at": datetime.datetime.utcnow().isoformat(),
+            "finished_at": None, "error": None,
+        })
+    threading.Thread(target=_run_obc_pipeline, daemon=True).start()
+    return jsonify({"success": True})
+
+
+@app.route("/api/obc_pipeline/status")
+def api_obc_pipeline_status():
+    with _obc_pipeline_lock:
+        state = dict(_obc_pipeline_state)
+    # Ground truth straight from BigQuery, independent of this process's own
+    # memory — if the server restarted mid-run, `state` above resets to
+    # "idle" even though a run may still genuinely be in flight (its
+    # BigQuery jobs keep running server-side regardless) or may have already
+    # finished. This gives visibility into the real state either way.
+    try:
+        rows = list(bq().query(f"""
+            SELECT RUN_ID, FSCL_YR_WK_KEY_VAL, NEED_RUN, NEED_POST
+            FROM {OBC_RUN_KEYS_VIEW}
+            ORDER BY WAVE_INDEX ASC, RUN_INDEX ASC
+            LIMIT 1
+        """).result())
+        if rows:
+            state["latest_run_id"] = str(rows[0].RUN_ID)
+            state["latest_fscl_yr_wk"] = rows[0].FSCL_YR_WK_KEY_VAL
+            state["latest_need_run"] = bool(rows[0].NEED_RUN)
+            state["latest_need_post"] = bool(rows[0].NEED_POST)
+    except Exception:
+        logger.exception("Failed to read latest OBC run-keys state")
+    return jsonify(state)
 
 
 def _resolve_is_import(event_name: str, default=None):
@@ -1817,15 +1957,22 @@ def api_factory_summary():
 @app.route("/api/export_results")
 def api_export_results():
     try:
+        # Matches the actual FINAL_ALLOCATIONS_WIDE schema (see the note in
+        # fetch_results in allocation_engine.py) — there is no THD_SKU_NBR,
+        # SISTER_SKU_NBR, MVNDR_NBR, OG_W*_UNITS, or DFC_W5_UNITS on this table.
+        # FACTORY_CUBE/FACTORY_CONTAINERS are an import-only concept (see
+        # is_import_run) — a domestic run leaves them as a meaningless sum
+        # across every row treated as one factory group, so skip them here too.
+        factory_totals = "FACTORY_CUBE, FACTORY_CONTAINERS" if is_import_run(bq()) else \
+            "CAST(NULL AS FLOAT64) AS FACTORY_CUBE, CAST(NULL AS FLOAT64) AS FACTORY_CONTAINERS"
         query = f"""
-            SELECT THD_SKU_NBR, SISTER_SKU_NBR, SKU_DESC,
-                   SUPPLIER, MVNDR_NBR, FACTORY_ID,
-                   BP, BUY_UNITS,
-                   OG_W1_UNITS, OG_W2_UNITS, OG_W3_UNITS, OG_W4_UNITS, OG_W5_UNITS,
-                   SKU_NBR, DC_NBR,
+            SELECT EVENT_NAME, EVENT_YEAR, THD_KEY_ID, SKU_NBR, SKU_DESC,
+                   SUPPLIER, IS_SISTER_SKU_FLAG, FACTORY_ID,
+                   BP, BUY_UNITS, DC_NBR,
                    DFC_PCT, DFC_UNITS, DFC_W1_UNITS, DFC_W2_UNITS,
-                   DFC_W3_UNITS, DFC_W4_UNITS, DFC_W5_UNITS,
-                   ITEM_CUBE, RACK_TYPE, FACTORY_CUBE, FACTORY_CONTAINERS
+                   DFC_W3_UNITS, DFC_W4_UNITS,
+                   ITEM_CUBE, RACK_TYPE, {factory_totals},
+                   DFC_CONTAINERS, DFC_CUBE
             FROM {FINAL_ALLOCATIONS}
             ORDER BY SKU_NBR, DC_NBR
         """

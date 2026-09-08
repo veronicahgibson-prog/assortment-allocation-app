@@ -362,7 +362,9 @@
                         <div id="vendorMatchSummary" style="margin-bottom:10px"></div>
                         <div id="vendorSupplierSummary" style="margin-top:14px"></div>
 
-                        <div style="display:flex;justify-content:center;margin-top:10px">
+                        <!-- Hidden for now per request; #btnShowAddVendorStrategy still exists so
+                             re-enabling is just removing this display:none. -->
+                        <div style="display:none;justify-content:center;margin-top:10px">
                             <button type="button" class="btn btn-sm btn-secondary" id="btnShowAddVendorStrategy">
                                 <i class="fas fa-plus"></i> Add Vendor Strategy
                             </button>
@@ -650,6 +652,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=316"></script>
+    <script src="/static/js/app.js?v=317"></script>
 </body>
 </html>
