@@ -1006,6 +1006,11 @@
             $("#btnRunAsmtTool").style.display = "inline-flex";
             $("#btnRunAsmtTool").disabled = false;
             toast("Cost model submission complete", "success");
+            // The preview above was rendered before this row set actually
+            // existed in DFC_COST_MODEL_SUBMISSION — reload it now so it
+            // shows the real inserted rows instead of whatever null/estimated
+            // state it had before submitting.
+            loadCostModelPreview();
             return true;
         } catch (e) {
             const failBadge = `<div class="validation-badge badge-fail" style="font-size:0.95rem">

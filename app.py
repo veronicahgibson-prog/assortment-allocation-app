@@ -1219,17 +1219,46 @@ def api_cost_model_preview():
         thd_skus = {r["sku_nbr"] for r in rows if not r["IS_SISTER_SKU_FLAG"]}
         sister_skus = {r["sku_nbr"] for r in rows if r["IS_SISTER_SKU_FLAG"]}
         overlap_skus = sorted(thd_skus & sister_skus)
+        sister_by_sku = {r["sku_nbr"]: r["IS_SISTER_SKU_FLAG"] for r in rows}
 
-        if vendor_matches:
+        year_q = f"SELECT DISTINCT EVENT_YEAR FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev LIMIT 1"
+        year_rows = list(bq().query(year_q, job_config=jc).result())
+        event_year = year_rows[0].EVENT_YEAR if year_rows else None
+
+        # If this event has already been submitted, show exactly what's in
+        # DFC_COST_MODEL_SUBMISSION rather than recomputing an estimate from
+        # vendor_matches — the latter reflects THIS PAGE LOAD's in-memory
+        # match state, which goes stale (a refresh, or revisiting this step
+        # later without re-matching) even though the real submission it was
+        # built from is untouched. Once submitted, the table is the truth.
+        existing_rows = []
+        if event_year is not None:
+            project_name = f"{event_year} {event_name}"
+            key = f"{CURRENT_USER}-{project_name}-{project_name}"
+            existing_q = f"""
+                SELECT sku_nbr, buy_qty, target_dc_count, dc_inclusions, dc_exclusions
+                FROM {DFC_COST_MODEL_SUBMISSION} WHERE `key` = @key
+            """
+            existing_jc = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter("key", "STRING", key),
+            ])
+            existing_rows = list(bq().query(existing_q, job_config=existing_jc).result())
+
+        if existing_rows:
+            table_rows = [{
+                "sku_nbr": er.sku_nbr,
+                "buy_qty": er.buy_qty,
+                "target_dc_count": er.target_dc_count,
+                "dc_inclusions": er.dc_inclusions,
+                "dc_exclusions": er.dc_exclusions,
+                "IS_SISTER_SKU_FLAG": sister_by_sku.get(er.sku_nbr, False),
+            } for er in existing_rows]
+        elif vendor_matches:
             # Same computation submission itself runs — the DC breakdown a
             # vendor-aligned event actually gets, not a stand-in for it. Can
             # yield more rows than `rows` above (a per-SKU override splits one
             # SKU_NBR into multiple DC-list rows), so the sister flag is
             # looked up per sku_nbr rather than assumed 1:1 with `rows`.
-            year_q = f"SELECT DISTINCT EVENT_YEAR FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev LIMIT 1"
-            year_rows = list(bq().query(year_q, job_config=jc).result())
-            event_year = year_rows[0].EVENT_YEAR if year_rows else None
-            sister_by_sku = {r["sku_nbr"]: r["IS_SISTER_SKU_FLAG"] for r in rows}
             submission_rows = _compute_vendor_aligned_submission_rows(bq(), event_name, event_year, vendor_matches)
             table_rows = [
                 {**r, "IS_SISTER_SKU_FLAG": sister_by_sku.get(r["sku_nbr"], False)}
