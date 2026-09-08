@@ -36,6 +36,10 @@
     // triggerAutoPriorYearCheck (assigned in setupPriorYearStrategy).
     let autoPriorYearCheckedFor = null;
     let triggerAutoPriorYearCheck = null;
+    // True while triggerAutoPriorYearCheck's lookup is in flight — Next is
+    // blocked during this window so the user can't proceed a beat before
+    // the prior-year strategy (e.g. Vendor-Aligned) actually gets selected.
+    let priorYearCheckInFlight = false;
     let assortmentResults = [];
     let resultsPage = 1;
     let resultsSort = "SKU_NBR";
@@ -446,10 +450,17 @@
             const key = `${name}|${year}|${isImportVal}`;
             if (autoPriorYearCheckedFor === key) return;
             autoPriorYearCheckedFor = key;
+            priorYearCheckInFlight = true;
+            const nextBtn = $("#btnGoInsert");
+            const nextBtnWasDisabled = nextBtn?.disabled;
+            if (nextBtn) nextBtn.disabled = true;
             try {
                 await performPriorYearCheck(name, year, isImportVal);
             } catch (e) {
                 return; // best-effort convenience pre-fill — not worth surfacing an error for
+            } finally {
+                priorYearCheckInFlight = false;
+                if (nextBtn) nextBtn.disabled = nextBtnWasDisabled;
             }
             if (currentStep === 2) refreshFollowLastYearUI();
         };
@@ -762,6 +773,10 @@
     // just because a file passed validation.
     function setupInsert() {
         $("#btnGoInsert")?.addEventListener("click", async () => {
+            if (priorYearCheckInFlight) {
+                toast("Still checking last year's strategy — try Next again in a moment", "error");
+                return;
+            }
             if (!selectedStrategy) {
                 toast("Please select a strategy first", "error");
                 return;
