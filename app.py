@@ -1097,38 +1097,6 @@ def api_add_vendor_strategy():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/dc_network/add", methods=["POST"])
-def api_add_dc_network():
-    """Register a new DC number/name for this running app instance.
-
-    DC_NAMES/ALLOWED_DFCS are plain Python constants in config.py, not a
-    BigQuery table — so this only extends the in-memory dict for the
-    lifetime of this server process. Making it durable across restarts
-    means adding the DC to config.py (and deploying), or standing up a real
-    DC-master table; this endpoint deliberately doesn't do either on its own.
-    """
-    body = request.get_json(silent=True) or {}
-    try:
-        dc_nbr = int(body.get("dc_nbr"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "dc_nbr must be a number."}), 400
-    dc_name = (body.get("dc_name") or "").strip()
-    if not dc_name:
-        return jsonify({"error": "dc_name is required."}), 400
-    if dc_nbr in DC_NAMES:
-        return jsonify({"error": f"DC {dc_nbr} already exists ({DC_NAMES[dc_nbr]})."}), 409
-
-    DC_NAMES[dc_nbr] = dc_name
-    logger.warning(f"Added DC {dc_nbr} ({dc_name}) to the in-memory DC network — "
-                    "this does not persist past a server restart; update config.py to make it permanent.")
-    return jsonify({
-        "success": True,
-        "message": f"Added DC {dc_nbr} ({dc_name}) for this session. This won't survive a restart — "
-                    "add it to config.py's DC_NAMES (and ALLOWED_DFCS for the relevant event types) to make it permanent.",
-        "dc_names": {str(k): v for k, v in DC_NAMES.items()},
-    })
-
-
 # ── Section 4b: DFC Cost Model Submission ────────────────────────────
 
 @app.route("/api/vendor_skus")

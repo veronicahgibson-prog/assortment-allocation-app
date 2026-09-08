@@ -387,8 +387,8 @@
             const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
             let html = `<div class="prior-strategy-card">
                 <div class="prior-strategy-heading">
-                    <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}${eventTypeLabel ? " " + eventTypeLabel : ""}</span>
-                        <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
+                    <div><span class="prior-strategy-kicker">${strategyLabel}</span>
+                        <h4><i class="fas fa-calendar-days"></i> ${result.event_name} <span style="color:var(--hd-orange)">${result.event_year}</span>${eventTypeLabel ? " " + eventTypeLabel : ""}</h4></div>
                     <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
                 </div>
                 <div class="prior-strategy-metrics">
@@ -870,6 +870,7 @@
     async function loadCostModelPreview() {
         if (!eventName) return;
         try {
+            await ensureVendorMatchesFresh();
             // vendorMatches makes this a true preview of the row set
             // /api/submit_cost_model would actually insert into
             // DFC_COST_MODEL_SUBMISSION (target_dc_count/dc_inclusions/
@@ -959,7 +960,7 @@
     function setupAsmtTool() {
         $("#btnSubmitCostModel")?.addEventListener("click", submitCostModel);
         $("#btnDownloadCostModel")?.addEventListener("click", downloadCostModelCsv);
-        $("#btnDeleteCostModel")?.addEventListener("click", deleteCostModelSubmission);
+        $("#btnDeleteCostModel")?.addEventListener("click", () => deleteCostModelSubmission());
         $("#btnRunAsmtTool")?.addEventListener("click", () => {
             window.open("https://dashboard-edw.homedepot.com/workflow/jobDetail?id=1d262d53-4868-41e3-90d2-f67d08d45f29", "_blank");
             $("#btnGoStrategyFromTool").disabled = false;
@@ -973,6 +974,11 @@
     async function submitCostModel() {
         showLoading("Submitting to DFC Cost Model…");
         try {
+            // matchVendorStrategy() shows/hides its own loading state when it
+            // actually has to run — restore ours afterward so the overlay
+            // doesn't drop out from under the submit that's still pending.
+            await ensureVendorMatchesFresh();
+            showLoading("Submitting to DFC Cost Model…");
             const resp = await fetch("/api/submit_cost_model", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -986,18 +992,27 @@
             const result = await resp.json();
             if (!resp.ok || result.error) throw new Error(result.error || "Submission failed");
 
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+            const passBadge = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> ${result.message}
             </div>`;
+            $("#costModelStatus").innerHTML = passBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = true;
+            $("#btnDeleteVendorCostModel").style.display = "none";
             $("#btnRunAsmtTool").style.display = "inline-flex";
             $("#btnRunAsmtTool").disabled = false;
             toast("Cost model submission complete", "success");
             return true;
         } catch (e) {
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
+            const failBadge = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
                 <i class="fas fa-times-circle"></i> ${e.message}
             </div>`;
+            $("#costModelStatus").innerHTML = failBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
+            // Surface the delete option inline wherever this error happened,
+            // so the user isn't forced to hunt for it in a different step.
+            const alreadySubmitted = /already been submitted/i.test(e.message);
+            $("#btnDeleteVendorCostModel").style.display = alreadySubmitted ? "inline-flex" : "none";
             toast("Submission failed: " + e.message, "error");
             return false;
         } finally {
@@ -1005,9 +1020,12 @@
         }
     }
 
-    async function deleteCostModelSubmission() {
-        if (!eventName) { toast("No event loaded", "error"); return; }
-        if (!confirm(`Delete all previous cost model submissions for "${eventName}"?`)) return;
+    // `silent` skips this function's own confirm dialog and success toast —
+    // used by replacePreviousUpload(), which already confirmed with the user
+    // and reports its own toast once the resubmit that follows also succeeds.
+    async function deleteCostModelSubmission(silent = false) {
+        if (!eventName) { toast("No event loaded", "error"); return false; }
+        if (!silent && !confirm(`Delete all previous cost model submissions for "${eventName}"?`)) return false;
         showLoading("Deleting previous submission…");
         try {
             const resp = await fetch("/api/delete_cost_model", {
@@ -1017,18 +1035,50 @@
             });
             const result = await resp.json();
             if (!resp.ok || result.error) throw new Error(result.error || "Delete failed");
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
+            const passBadge = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> ${result.message}
             </div>`;
+            $("#costModelStatus").innerHTML = passBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = false;
-            toast("Previous submission deleted", "success");
+            $("#btnDeleteVendorCostModel").style.display = "none";
+            // Let the user resubmit through the vendor-aligned confirm flow too.
+            vendorStrategyConfirmed = false;
+            if ($("#btnConfirmVendorStrategy")) {
+                $("#btnConfirmVendorStrategy").disabled = false;
+                $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check"></i> Confirm Vendor Strategies';
+            }
+            if (!silent) toast("Previous submission deleted", "success");
+            return true;
         } catch (e) {
-            $("#costModelStatus").innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
+            const failBadge = `<div class="validation-badge badge-fail" style="font-size:0.95rem">
                 <i class="fas fa-times-circle"></i> ${e.message}
             </div>`;
+            $("#costModelStatus").innerHTML = failBadge;
+            if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
             toast("Delete failed: " + e.message, "error");
+            return false;
         } finally {
             hideLoading();
+        }
+    }
+
+    // Full "Replace Previous Upload" action for the vendor-aligned flow:
+    // deletes the prior DFC_COST_MODEL_SUBMISSION rows for this event and
+    // immediately resubmits the current upload in their place, so the
+    // replacement is complete in one click rather than deferring the
+    // resubmit to whenever the user next hits Confirm/Next.
+    async function replacePreviousUpload() {
+        if (!eventName) { toast("No event loaded", "error"); return; }
+        if (!confirm(`Delete the previous cost model submission for "${eventName}" and upload the current data in its place?`)) return;
+        const deleted = await deleteCostModelSubmission(true);
+        if (!deleted) return;
+        const submitted = await submitCostModel();
+        if (submitted) {
+            vendorStrategyConfirmed = true;
+            $("#btnConfirmVendorStrategy").disabled = true;
+            $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
+            toast("Previous submission replaced with current upload", "success");
         }
     }
 
@@ -1155,6 +1205,30 @@
         // Step 2's Next button, which runs this same commit automatically if
         // the user proceeds without clicking Confirm themselves.
         $("#btnConfirmVendorStrategy")?.addEventListener("click", confirmVendorStrategy);
+        $("#btnDeleteVendorCostModel")?.addEventListener("click", replacePreviousUpload);
+
+        // Add Vendor Strategy — writes a new row straight into
+        // VENDOR_ALIGNED_STRATEGY (ASMT_ID left null; it's only known once
+        // the assortment tool has run for this vendor's DC group), then
+        // re-runs matching so this event's suppliers pick it up immediately.
+        $("#btnShowAddVendorStrategy")?.addEventListener("click", () => {
+            pickedVendorStrategyDcs = new Set();
+            renderVendorStrategyDcPicker();
+            renderAddVendorStrategyNameOptions();
+            $("#addVendorStrategyForm").style.display = "block";
+        });
+        $("#btnCancelAddVendorStrategy")?.addEventListener("click", () => {
+            $("#addVendorStrategyForm").style.display = "none";
+        });
+        $("#newVendorStrategyName")?.addEventListener("change", () => {
+            const isOther = $("#newVendorStrategyName").value === "__other__";
+            const custom = $("#newVendorStrategyNameCustom");
+            if (custom) {
+                custom.style.display = isOther ? "block" : "none";
+                if (isOther) custom.focus();
+            }
+        });
+        $("#btnSaveVendorStrategy")?.addEventListener("click", saveVendorStrategy);
 
         // Load DC counts button
         $("#btnLoadDcCounts")?.addEventListener("click", loadAvailableDcCounts);
@@ -1427,6 +1501,85 @@
         }
     }
 
+    let pickedVendorStrategyDcs = new Set();
+
+    function renderVendorStrategyDcPicker() {
+        const el = $("#newVendorStrategyDcPicker");
+        if (!el) return;
+        el.innerHTML = ALL_DCS.map(dc => {
+            const active = pickedVendorStrategyDcs.has(dc.nbr);
+            return `<button type="button" class="dc-toggle-btn vendor-dc-btn${active ? " active" : ""}"
+                data-dc-nbr="${dc.nbr}" title="${dc.name}">${dc.nbr}</button>`;
+        }).join("");
+        el.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+            const dc = Number(b.dataset.dcNbr);
+            pickedVendorStrategyDcs.has(dc) ? pickedVendorStrategyDcs.delete(dc) : pickedVendorStrategyDcs.add(dc);
+            renderVendorStrategyDcPicker();
+        }));
+    }
+
+    // Populates the "Add Vendor Strategy" name field from this upload's
+    // distinct suppliers (vendorMatches) instead of free text, so a new
+    // strategy always attaches to a real supplier on the current event.
+    // Each option is labeled with the VENDOR_ALIGNED_STRATEGY name it
+    // currently resolves to (often "OTHER") and flagged with ⚠ when it's
+    // only getting the generic fallback — so a supplier like "ALLEY CAT"
+    // that has no dedicated strategy yet is easy to pick out and fix.
+    function renderAddVendorStrategyNameOptions() {
+        const select = $("#newVendorStrategyName");
+        const custom = $("#newVendorStrategyNameCustom");
+        if (!select) return;
+        const seen = new Set();
+        const options = vendorMatches
+            .map(m => ({ supplier: (m.SUPPLIER || "").trim(), current: (m.VENDOR || "OTHER").toUpperCase() }))
+            .filter(o => o.supplier && !seen.has(o.supplier) && seen.add(o.supplier))
+            .sort((a, b) => a.supplier.localeCompare(b.supplier));
+        select.innerHTML = `<option value="">Select a supplier from this upload…</option>`
+            + options.map(o => `<option value="${o.supplier}">${o.current === "OTHER" ? "⚠ " : ""}${o.supplier} — currently: ${o.current}</option>`).join("")
+            + `<option value="__other__">+ Enter a different vendor name…</option>`;
+        select.value = "";
+        if (custom) { custom.style.display = "none"; custom.value = ""; }
+    }
+
+    async function saveVendorStrategy() {
+        const select = $("#newVendorStrategyName");
+        const isOther = select?.value === "__other__";
+        const name = (isOther ? $("#newVendorStrategyNameCustom")?.value : select?.value || "").trim();
+        if (!name) { toast("Select or enter a vendor name", "error"); return; }
+        if (!pickedVendorStrategyDcs.size) { toast("Select at least one DC", "error"); return; }
+        showLoading("Adding vendor strategy…");
+        try {
+            const result = await api("/api/vendor_strategy/add", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ vendor: name, dc_list: [...pickedVendorStrategyDcs] }),
+            });
+            toast(result.message || `Added ${name.toUpperCase()}`, "success");
+            $("#addVendorStrategyForm").style.display = "none";
+            pickedVendorStrategyDcs = new Set();
+            // Re-run matching so this event's suppliers (including ones
+            // currently falling back to OTHER) pick up the new vendor row.
+            await matchVendorStrategy();
+        } catch (e) {
+            toast("Failed to add vendor strategy: " + e.message, "error");
+        } finally {
+            hideLoading();
+        }
+    }
+
+    // Guards submitCostModel()/loadCostModelPreview() against ever sending an
+    // empty vendor_matches for a Vendor-Aligned event — that's exactly what
+    // makes target_dc_count/dc_inclusions/dc_exclusions come back null, since
+    // the backend can't tell "no vendor-aligned assignments exist" apart from
+    // "this event isn't vendor-aligned." vendorMatches only ever gets
+    // populated by matchVendorStrategy(), so if it's empty here re-run it
+    // rather than submit/preview against stale or never-fetched matches.
+    async function ensureVendorMatchesFresh() {
+        if (selectedStrategy === "VENDOR_ALIGNED" && !vendorMatches.length) {
+            await matchVendorStrategy();
+        }
+    }
+
     async function matchVendorStrategy() {
         showLoading("Matching suppliers to vendor strategies…");
         try {
@@ -1546,7 +1699,7 @@
                 <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
             result.rows.forEach(row => {
                 const selectedDcs = vendorSkuDcs(match, row);
-                html += `<tr><td><div class="vendor-dc-buttons">
+                html += `<tr data-sku-key="${row.THD_SKU_NBR}"><td><div class="vendor-dc-buttons">
                     ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
                         dataAttrs: ` data-sku-key="${row.THD_SKU_NBR}"`,
@@ -1576,6 +1729,49 @@
         }
     }
 
+    // Repaints one already-rendered SKU row's DC buttons/count/override badge
+    // in place, without a network round trip. THD_SKU_NBR/SKU_DESC/units/cube
+    // don't change when a DC override is toggled — only the client-side
+    // SKU_OVERRIDES state does — so there's nothing here that
+    // /api/vendor_skus needs to be asked about again, unlike the initial page
+    // load or paging to a different set of SKUs.
+    function rerenderVendorSkuRow(matchIndex, skuKey) {
+        const match = vendorMatches[matchIndex];
+        const container = $(`#vendor-skus-${matchIndex}`);
+        if (!match || !container) return;
+        const row = container.querySelector(`tr[data-sku-key="${CSS.escape(String(skuKey))}"]`);
+        if (!row) return;
+
+        const defaultDcs = parseVendorDcs(match.DC_LIST);
+        const names = parseVendorNames(match._initialDcNames);
+        const selectedDcs = parseVendorDcs(match.SKU_OVERRIDES[skuKey] || match.DC_LIST);
+
+        const btnCell = row.querySelector(".vendor-dc-buttons");
+        if (btnCell) {
+            btnCell.innerHTML = renderDcButtonGrid(matchIndex, defaultDcs, names, selectedDcs, {
+                extraClass: " vendor-sku-dc-btn",
+                dataAttrs: ` data-sku-key="${skuKey}"`,
+            });
+            btnCell.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
+                button.addEventListener("click", () => toggleVendorSkuDc(
+                    Number(button.dataset.matchIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
+                ));
+            });
+        }
+
+        const overrideHolder = btnCell?.parentElement;
+        const existingBadge = overrideHolder?.querySelector(".vendor-sku-override");
+        const hasOverride = !!match.SKU_OVERRIDES[skuKey];
+        if (hasOverride && !existingBadge) {
+            overrideHolder.insertAdjacentHTML("beforeend", '<span class="vendor-sku-override">Override</span>');
+        } else if (!hasOverride && existingBadge) {
+            existingBadge.remove();
+        }
+
+        const countCell = row.querySelector(".vendor-sku-count");
+        if (countCell) countCell.textContent = selectedDcs.length;
+    }
+
     function toggleVendorSkuDc(matchIndex, skuKey, dcNbr) {
         const match = vendorMatches[matchIndex];
         if (!match) return;
@@ -1590,8 +1786,7 @@
         const defaults = parseVendorDcs(match.DC_LIST);
         if (next.join(",") === defaults.join(",")) delete match.SKU_OVERRIDES[skuKey];
         else match.SKU_OVERRIDES[skuKey] = next;
-        const page = Number($(`#vendor-skus-${matchIndex} .vendor-sku-next`)?.dataset.page || 1) - 1 || 1;
-        loadVendorSkuRows(matchIndex, page);
+        rerenderVendorSkuRow(matchIndex, skuKey);
     }
 
     // Per-supplier rollup of the vendor-strategy match: SKU count comes from
