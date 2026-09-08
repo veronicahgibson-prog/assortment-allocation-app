@@ -504,6 +504,9 @@
         fileInput.addEventListener("change", () => {
             if (fileInput.files.length) handleFile(fileInput.files[0]);
         });
+        $("#btnDownloadAnnotatedUpload")?.addEventListener("click", () => {
+            window.location.href = "/api/download_annotated_upload";
+        });
     }
 
     async function handleFile(file) {
@@ -529,6 +532,16 @@
         const formData = new FormData();
         formData.append("file", file);
         formData.append("includes_imports", includesImports.toString());
+
+        // Lets the backend warn if the uploaded file's own EVENT_NAME/
+        // EVENT_YEAR don't match what was picked in Step 1 — only meaningful
+        // when an *existing* event was selected there, not a freshly typed one.
+        const step1EventSelect = $("#step1EventNameSelect");
+        const step1EventCustom = $("#step1EventNameCustom");
+        const step1IsExistingEvent = !!step1EventSelect && step1EventSelect.value !== "" && step1EventSelect.value !== "__other__";
+        formData.append("step1_event_name", step1IsExistingEvent ? step1EventSelect.value : (step1EventCustom?.value || ""));
+        formData.append("step1_event_year", $("#step1EventYear")?.value || "");
+        formData.append("step1_is_existing_event", step1IsExistingEvent.toString());
 
         // Reset mismatch alert
         const mismatchEl = $("#importMismatchAlert");
@@ -571,6 +584,14 @@
             $("#importMismatchAlert").style.display = "block";
             toast(result.import_mismatch_msg, "error");
             return;
+        }
+
+        // Available whenever there's something worth reviewing row-by-row —
+        // failed rows to fix, or rows the validator silently adjusted.
+        const downloadAnnotatedBtn = $("#btnDownloadAnnotatedUpload");
+        if (downloadAnnotatedBtn) {
+            const hasIssues = (result.errors?.length || 0) > 0 || (result.warnings?.length || 0) > 0;
+            downloadAnnotatedBtn.style.display = hasIssues ? "inline-flex" : "none";
         }
 
         // Checks list

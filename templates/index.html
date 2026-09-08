@@ -240,6 +240,14 @@
                 <h4 style="margin-bottom:8px">Validation Checks</h4>
                 <div id="checksList"></div>
 
+                <!-- Shown whenever there are failed and/or adjusted rows to review —
+                     re-exports the upload with failed rows highlighted red, adjusted
+                     rows (BUY_UNITS/WAVE rounded to a BP multiple) highlighted yellow,
+                     both pulled to the top in that order. -->
+                <button class="btn btn-sm btn-secondary" id="btnDownloadAnnotatedUpload" style="display:none;margin-top:10px">
+                    <i class="fas fa-file-arrow-down"></i> Download Annotated File
+                </button>
+
                 <!-- Errors -->
                 <div id="errorSection" style="display:none;margin-top:12px">
                     <h4 style="color:var(--hd-red);margin-bottom:8px"><i class="fas fa-times-circle"></i> Errors</h4>
@@ -652,6 +660,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=317"></script>
+    <script src="/static/js/app.js?v=318"></script>
 </body>
 </html>

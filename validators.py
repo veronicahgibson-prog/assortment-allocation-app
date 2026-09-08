@@ -28,7 +28,9 @@ def _determine_thd_key(df, includes_imports):
     return key_cols
 
 
-def validate_upload(df: pd.DataFrame, includes_imports: bool = False) -> dict:
+def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
+                     step1_event_name: str = "", step1_event_year: str = "",
+                     step1_is_existing_event: bool = False) -> dict:
     """Run validation checks. Returns {passed, checks, errors, summary}."""
     checks = []
     errors = []
@@ -289,6 +291,49 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False) -> dict:
         "details": key_details,
     })
     errors.extend(key_errors)
+
+    # 7. Matches the event selected in Step 1 — only meaningful when the user
+    # picked an *existing* event from the dropdown there (a brand-new event
+    # has nothing to compare against, and shouldn't be flagged just because
+    # the file's own EVENT_NAME differs from unrelated free text typed in).
+    # A warning, not a hard error — the file's own EVENT_NAME/EVENT_YEAR are
+    # what actually get inserted, so a mismatch is worth surfacing but never
+    # blocks the upload from proceeding if the user means to go ahead anyway.
+    step1_mismatch = []
+    if step1_is_existing_event and step1_event_name:
+        file_event_name = ""
+        if "EVENT_NAME" in df.columns and df["EVENT_NAME"].notna().any():
+            file_event_name = str(df["EVENT_NAME"].dropna().iloc[0]).strip().upper()
+        name_mismatch = bool(file_event_name) and file_event_name != step1_event_name.strip().upper()
+
+        file_event_year = None
+        year_mismatch = False
+        if step1_event_year and "EVENT_YEAR" in df.columns and df["EVENT_YEAR"].notna().any():
+            try:
+                file_event_year = int(float(df["EVENT_YEAR"].dropna().iloc[0]))
+                year_mismatch = file_event_year != int(float(step1_event_year))
+            except (TypeError, ValueError):
+                pass
+
+        if name_mismatch or year_mismatch:
+            parts = []
+            if name_mismatch:
+                parts.append(f"file EVENT_NAME '{file_event_name}' vs. Step 1's '{step1_event_name.strip().upper()}'")
+            if year_mismatch:
+                parts.append(f"file EVENT_YEAR {file_event_year} vs. Step 1's {step1_event_year}")
+            step1_mismatch.append({
+                "row": "—", "column": "EVENT_NAME/EVENT_YEAR", "row_data": {},
+                "message": "Doesn't match the event selected in Step 1 — " + "; ".join(parts),
+            })
+    checks.append({
+        "id": 7,
+        "name": "Matches event selected in Step 1",
+        "passed": True,
+        "detail": "Mismatch found — you can still proceed if this is intentional" if step1_mismatch
+            else ("Matches Step 1 selection" if step1_is_existing_event and step1_event_name else "N/A — new event"),
+        "warning": len(step1_mismatch) > 0,
+        "details": step1_mismatch,
+    })
 
     passed = all(c["passed"] for c in checks)
 

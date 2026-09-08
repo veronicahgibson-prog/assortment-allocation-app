@@ -263,7 +263,24 @@ def upload_file():
             df = df.iloc[1:].reset_index(drop=True)
 
     includes_imports = request.form.get("includes_imports", "false").lower() == "true"
-    result = validate_upload(df, includes_imports=includes_imports)
+    step1_event_name = request.form.get("step1_event_name", "")
+    step1_event_year = request.form.get("step1_event_year", "")
+    step1_is_existing_event = request.form.get("step1_is_existing_event", "false").lower() == "true"
+    result = validate_upload(
+        df, includes_imports=includes_imports,
+        step1_event_name=step1_event_name, step1_event_year=step1_event_year,
+        step1_is_existing_event=step1_is_existing_event,
+    )
+
+    # Cached regardless of pass/fail so a failed (or warning-carrying) upload
+    # can still be downloaded back out annotated — see
+    # /api/download_annotated_upload. Separate from the "df"/"event_name"
+    # keys below, which the rest of the app treats as "the last upload that
+    # actually passed and is ready to insert" — a failed attempt must never
+    # leak into that.
+    _upload_cache["last_raw_df"] = df
+    _upload_cache["last_errors"] = result.get("errors", [])
+    _upload_cache["last_warnings"] = result.get("warnings", [])
 
     if result["passed"]:
         _upload_cache["df"] = df
@@ -312,6 +329,73 @@ def upload_file():
         )
 
     return jsonify(result)
+
+
+@app.route("/api/download_annotated_upload")
+def download_annotated_upload():
+    """Re-export the most recently uploaded file (pass or fail) with failed
+    rows highlighted light red, rows the validator adjusted (BUY_UNITS/WAVE
+    rounded up to a BP multiple) highlighted yellow, and both pulled to the
+    top — failed rows first, then adjusted rows, then everything else — so
+    the user can find what needs fixing without hunting through the whole
+    file."""
+    df = _upload_cache.get("last_raw_df")
+    if df is None:
+        return jsonify({"error": "No upload to annotate — upload a file first."}), 400
+
+    errors = _upload_cache.get("last_errors", [])
+    warnings = _upload_cache.get("last_warnings", [])
+    # "row" is the 1-indexed spreadsheet row (header + 1), or "—" for a
+    # file-level issue with no single row to point at — only real rows can
+    # be highlighted/reordered.
+    error_rows = {e["row"] - 2 for e in errors if isinstance(e.get("row"), int)}
+    warning_rows = {w["row"] - 2 for w in warnings if isinstance(w.get("row"), int)} - error_rows
+
+    order = (
+        [i for i in df.index if i in error_rows]
+        + [i for i in df.index if i in warning_rows]
+        + [i for i in df.index if i not in error_rows and i not in warning_rows]
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "SKU List"
+
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    cols = list(df.columns)
+    for c_idx, col_name in enumerate(cols, 1):
+        cell = ws.cell(row=1, column=c_idx, value=col_name)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+        ws.column_dimensions[cell.column_letter].width = max(len(col_name) + 4, 12)
+
+    for r_idx, orig_idx in enumerate(order, 2):
+        row_fill = red_fill if orig_idx in error_rows else yellow_fill if orig_idx in warning_rows else None
+        for c_idx, col_name in enumerate(cols, 1):
+            val = df.at[orig_idx, col_name]
+            cell = ws.cell(row=r_idx, column=c_idx, value=None if pd.isna(val) else val)
+            cell.border = thin_border
+            if row_fill:
+                cell.fill = row_fill
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf, as_attachment=True, download_name="sku_list_annotated.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 # ── Section 2b: BigQuery Validation ─────────────────────────────────
