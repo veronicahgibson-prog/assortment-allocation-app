@@ -1652,7 +1652,7 @@
     const DC_COLOR = {
         5523: { fill: "#7e4d35", step: 4 },
         5820: { fill: "#363d47", step: 13 },
-        5823: { fill: "#9c4415", step: 0 },
+        5823: { fill: "#f96302", step: 0 }, // matches --hd-orange (the "Confirm Vendor Strategies" button)
         5829: { fill: "#854b2f", step: 3 },
         5831: { fill: "#2f3846", step: 14 },
         5832: { fill: "#12233f", step: 18 },
