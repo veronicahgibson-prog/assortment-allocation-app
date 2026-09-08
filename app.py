@@ -1221,6 +1221,54 @@ def api_cost_model_preview():
         overlap_skus = sorted(thd_skus & sister_skus)
         sister_by_sku = {r["sku_nbr"]: r["IS_SISTER_SKU_FLAG"] for r in rows}
 
+        # Reconciliation: how many raw uploaded rows collapsed into how many
+        # distinct SKU_NBRs, and which SKUs are worth a second look — one
+        # built from multiple uploaded rows (a "merge"), or resolved from
+        # sister-SKU data rather than the THD SKU itself. Surfaced as
+        # exceptions rather than a per-row expand/collapse, since an upload
+        # can run to 1000+ THD keys and scanning all of them isn't how
+        # anyone actually audits a rollup — only the handful that need a
+        # second look are worth showing.
+        raw_q = f"""
+            SELECT CAST(SKU_NBR AS STRING) AS sku_nbr, THD_SKU_NBR, SISTER_SKU_NBR,
+                   SKU_DESC, BUY_UNITS, IS_SISTER_SKU_FLAG
+            FROM {EVENTS_SKU_LIST}
+            WHERE EVENT_NAME = @ev
+        """
+        raw_rows = [dict(r) for r in bq().query(raw_q, job_config=jc).result()]
+        uploaded_row_count = len(raw_rows)
+
+        rows_by_sku = {}
+        for r in raw_rows:
+            rows_by_sku.setdefault(r["sku_nbr"], []).append(r)
+
+        merged_skus = [
+            {
+                "sku_nbr": sku_nbr,
+                "sources": [
+                    {
+                        "thd_sku_nbr": src["THD_SKU_NBR"],
+                        "sister_sku_nbr": src["SISTER_SKU_NBR"],
+                        "sku_desc": src["SKU_DESC"],
+                        "buy_units": src["BUY_UNITS"],
+                        "is_sister": src["IS_SISTER_SKU_FLAG"],
+                    }
+                    for src in group
+                ],
+            }
+            for sku_nbr, group in rows_by_sku.items() if len(group) > 1
+        ]
+
+        sister_sourced_skus = [
+            {
+                "sku_nbr": r["sku_nbr"],
+                "thd_sku_nbr": r["THD_SKU_NBR"],
+                "sister_sku_nbr": r["SISTER_SKU_NBR"],
+                "sku_desc": r["SKU_DESC"],
+            }
+            for r in raw_rows if r["IS_SISTER_SKU_FLAG"]
+        ]
+
         year_q = f"SELECT DISTINCT EVENT_YEAR FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev LIMIT 1"
         year_rows = list(bq().query(year_q, job_config=jc).result())
         event_year = year_rows[0].EVENT_YEAR if year_rows else None
@@ -1280,6 +1328,14 @@ def api_cost_model_preview():
             "thd_count": thd_count,
             "sister_count": sister_count,
             "overlap_skus": overlap_skus,
+            "reconciliation": {
+                "uploaded_rows": uploaded_row_count,
+                "resolved_skus": len(rows),
+                "merged_count": len(merged_skus),
+                "sister_sourced_count": len(sister_sourced_skus),
+            },
+            "merged_skus": merged_skus,
+            "sister_sourced_skus": sister_sourced_skus,
         })
     except Exception as e:
         logger.exception("cost_model_preview error")

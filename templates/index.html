@@ -146,6 +146,27 @@
                         <i class="fas fa-download"></i> Download CSV
                     </button>
                 </div>
+
+                <!-- Reconciliation: uploaded rows vs resolved SKUs, at a glance -->
+                <div id="skuReconciliation" style="display:none;margin-bottom:10px;font-size:.85rem;color:var(--hd-medium-gray)"></div>
+
+                <!-- Exceptions only — not a per-row expand, since an upload can run to
+                     1000+ THD keys and scanning all of them isn't how anyone actually
+                     audits a rollup. -->
+                <details id="mergedSkusPanel" style="display:none;margin-bottom:10px;padding:10px 14px;background:#fff3cd;border:1px solid #ffc107;border-radius:8px">
+                    <summary style="cursor:pointer;font-size:.85rem;color:#856404"><strong id="mergedSkusSummary"></strong> — multiple uploaded rows resolved to the same SKU</summary>
+                    <div id="mergedSkusBody" style="margin-top:10px;font-size:.8rem"></div>
+                </details>
+                <details id="sisterSourcedPanel" style="display:none;margin-bottom:10px;padding:10px 14px;background:#eef6ff;border:1px solid #b6d4fe;border-radius:8px">
+                    <summary style="cursor:pointer;font-size:.85rem;color:#31708f"><strong id="sisterSourcedSummary"></strong> — using sister-SKU (proxy) data instead of the THD SKU directly</summary>
+                    <div class="table-container" style="max-height:220px;overflow-y:auto;margin-top:10px">
+                        <table class="detail-table" id="sisterSourcedTable" style="font-size:.78rem">
+                            <thead><tr><th>SKU_NBR</th><th>THD_SKU_NBR</th><th>SISTER_SKU_NBR</th><th>SKU_DESC</th></tr></thead>
+                            <tbody id="sisterSourcedBody"></tbody>
+                        </table>
+                    </div>
+                </details>
+
                 <div class="table-container" style="max-height:300px;overflow-y:auto">
                     <table class="detail-table" id="costModelTable">
                         <thead><tr><th>SKU_NBR</th><th>BUY_QTY</th><th>TARGET_DC_COUNT</th><th>DC_INCLUSIONS</th><th>DC_EXCLUSIONS</th><th>TYPE</th></tr></thead>
@@ -619,6 +640,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=311"></script>
+    <script src="/static/js/app.js?v=312"></script>
 </body>
 </html>

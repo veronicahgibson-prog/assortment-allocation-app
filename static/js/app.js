@@ -926,6 +926,56 @@
                 overlapEl.style.display = "none";
             }
 
+            // Reconciliation stat + exceptions — surfaced instead of a
+            // per-row expand/collapse, since an upload can run to 1000+ THD
+            // keys and scanning every row isn't how anyone actually audits
+            // a rollup. Only the SKUs that need a second look show up here:
+            // ones built from more than one uploaded row, or resolved from
+            // sister-SKU data rather than the THD SKU itself.
+            const recon = result.reconciliation;
+            const reconEl = $("#skuReconciliation");
+            if (reconEl && recon) {
+                reconEl.style.display = "block";
+                const parts = [`${fmtNum(recon.uploaded_rows)} uploaded row${recon.uploaded_rows === 1 ? "" : "s"} → ${fmtNum(recon.resolved_skus)} SKU${recon.resolved_skus === 1 ? "" : "s"}`];
+                if (recon.merged_count) parts.push(`${recon.merged_count} merged`);
+                if (recon.sister_sourced_count) parts.push(`${recon.sister_sourced_count} sister-sourced`);
+                reconEl.innerHTML = parts.join(" · ");
+            }
+
+            const mergedPanel = $("#mergedSkusPanel");
+            const mergedSkus = result.merged_skus || [];
+            if (mergedPanel) {
+                mergedPanel.style.display = mergedSkus.length ? "block" : "none";
+                if (mergedSkus.length) {
+                    $("#mergedSkusSummary").textContent = `${mergedSkus.length} SKU${mergedSkus.length === 1 ? "" : "s"} merged`;
+                    $("#mergedSkusBody").innerHTML = mergedSkus.map(m => {
+                        const sourceRows = m.sources.map(s =>
+                            `<div style="padding:4px 0;border-top:1px solid #ffe8a1">`
+                            + `THD ${s.thd_sku_nbr ?? "—"}${s.sister_sku_nbr ? ` / Sister ${s.sister_sku_nbr}` : ""} `
+                            + `— ${s.sku_desc || "—"} (${fmtNum(s.buy_units)} units${s.is_sister ? ", sister-sourced" : ""})`
+                            + `</div>`
+                        ).join("");
+                        return `<div style="margin-bottom:8px"><strong>SKU ${m.sku_nbr}</strong> — ${m.sources.length} uploaded rows${sourceRows}</div>`;
+                    }).join("");
+                }
+            }
+
+            const sisterPanel = $("#sisterSourcedPanel");
+            const sisterSourcedSkus = result.sister_sourced_skus || [];
+            if (sisterPanel) {
+                sisterPanel.style.display = sisterSourcedSkus.length ? "block" : "none";
+                if (sisterSourcedSkus.length) {
+                    $("#sisterSourcedSummary").textContent = `${sisterSourcedSkus.length} SKU${sisterSourcedSkus.length === 1 ? "" : "s"}`;
+                    const sisterBody = $("#sisterSourcedBody");
+                    sisterBody.innerHTML = "";
+                    for (const s of sisterSourcedSkus) {
+                        const tr = document.createElement("tr");
+                        tr.innerHTML = `<td>${s.sku_nbr}</td><td>${s.thd_sku_nbr ?? "—"}</td><td>${s.sister_sku_nbr ?? "—"}</td><td>${s.sku_desc || "—"}</td>`;
+                        sisterBody.appendChild(tr);
+                    }
+                }
+            }
+
             const tbody = $("#costModelBody");
             tbody.innerHTML = "";
             for (const r of result.rows) {
