@@ -323,7 +323,7 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
             file_label = f"{file_event_name or '—'} {file_event_year if file_event_year is not None else '—'}".strip()
             step1_mismatch.append({
                 "row": "—", "column": "EVENT_NAME/EVENT_YEAR", "row_data": {},
-                "message": f"Corrected to Step 1's selection — Step 1: {step1_label}  —  File had: {file_label}",
+                "message": f"Corrected to {step1_label} (file had {file_label})",
             })
             if name_mismatch and "EVENT_NAME" in df.columns:
                 df["EVENT_NAME"] = step1_event_name.strip().upper()
