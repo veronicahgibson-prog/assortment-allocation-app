@@ -1339,10 +1339,13 @@
                     // No manual "Match Suppliers" button anymore — if a file's
                     // already been uploaded (whether Vendor-Aligned was just
                     // selected after that upload, or this fires again from
-                    // re-selecting it), match right away.
+                    // re-selecting it), match right away. But if matches are
+                    // already populated (e.g. the user toggled to DC Selection
+                    // and back without changing anything), leave them alone —
+                    // rematching would needlessly reset the Confirm state.
                     if (eventName) {
                         noteVendorAlignedApplied();
-                        matchVendorStrategy();
+                        if (!vendorMatches.length) matchVendorStrategy();
                     }
                 } else if (stratVal === "DC_SELECTION" || stratVal === "SINGLE_DC" || stratVal === "MULTI_DC") {
                     selectedStrategy = "DC_SELECTION";
