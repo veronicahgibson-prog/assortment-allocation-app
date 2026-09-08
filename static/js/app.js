@@ -2416,6 +2416,10 @@
             $("#rKpiUnits").textContent = fmtNum(s.total_buy_units);
             $("#rKpiDcs").textContent = fmtNum(s.total_dcs);
             $("#rKpiFactories").textContent = fmtNum(s.unique_factories);
+            // Factory concept doesn't exist for a domestic event — show the
+            // KPI card only for imports rather than a confusing "0".
+            const factoriesCard = $("#rKpiFactoriesCard");
+            if (factoriesCard) factoriesCard.style.display = includesImports ? "" : "none";
         } catch (e) {
             console.error("KPI error:", e);
         }
@@ -2438,10 +2442,20 @@
         }
     }
 
+    // FACTORY_ID doesn't exist for a domestic event (factories are an
+    // import-only concept) — includesImports is set back in Step 1 and
+    // carried through as the one source of truth for that, rather than
+    // inferring it from whatever happens to come back in a given page of
+    // results.
+    function getVisibleResultColumns() {
+        return includesImports ? RESULT_COLUMNS : RESULT_COLUMNS.filter(c => c.key !== "FACTORY_ID");
+    }
+
     function renderResultsTable(data) {
+        const visibleColumns = getVisibleResultColumns();
         const headRow = $("#resultsHead");
         headRow.innerHTML = "";
-        for (const col of RESULT_COLUMNS) {
+        for (const col of visibleColumns) {
             const th = document.createElement("th");
             th.textContent = col.label;
             th.dataset.col = col.key;
@@ -2458,12 +2472,12 @@
         const tbody = $("#resultsBody");
         tbody.innerHTML = "";
         if (!data.length) {
-            tbody.innerHTML = `<tr><td colspan="${RESULT_COLUMNS.length}" style="text-align:center;color:#666;padding:30px">No results</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="${visibleColumns.length}" style="text-align:center;color:#666;padding:30px">No results</td></tr>`;
             return;
         }
         for (const row of data) {
             const tr = document.createElement("tr");
-            for (const col of RESULT_COLUMNS) {
+            for (const col of visibleColumns) {
                 const td = document.createElement("td");
                 td.textContent = fmtCell(row[col.key], col.fmt);
                 if (col.fmt === "number" || col.fmt === "pct") {
