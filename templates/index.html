@@ -350,6 +350,11 @@
                             <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
                                 <div>
                                     <label style="font-size:.72rem;font-weight:700;color:var(--hd-medium-gray);text-transform:uppercase">Vendor name</label>
+                                    <!-- Sourced from this upload's distinct SUPPLIER values (via
+                                         vendorMatches) rather than free text, so a strategy always
+                                         attaches to a real supplier on the current event. Each
+                                         option shows what it's currently matched to (often "OTHER")
+                                         so suppliers without a dedicated strategy stand out. -->
                                     <select id="newVendorStrategyName"
                                         style="display:block;width:280px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
                                         <option value="">Select a supplier from this upload…</option>
@@ -619,6 +624,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=311"></script>
+    <script src="/static/js/app.js?v=312"></script>
 </body>
 </html>
