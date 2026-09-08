@@ -53,13 +53,16 @@ def _vendor_aligned(client: bigquery.Client, params: dict) -> dict:
     if not vendor_matches:
         return {"results": [], "error": "No vendor matches provided. Run Match first."}
 
-    # Count SKUs per vendor and deduplicate
+    # Sum each matched supplier's own distinct-THD-key SKU_COUNT per vendor —
+    # multiple suppliers can map to the same vendor bucket, so counting match
+    # rows (1 per supplier) instead of summing SKU_COUNT undercounts whenever
+    # a supplier has more than one THD key.
     vendor_counts = {}
     for m in vendor_matches:
         vendor = m["VENDOR"]
         if vendor not in vendor_counts:
             vendor_counts[vendor] = {"count": 0, "data": m}
-        vendor_counts[vendor]["count"] += 1
+        vendor_counts[vendor]["count"] += int(m.get("SKU_COUNT", 0) or 0)
 
     results = []
     for vendor, info in vendor_counts.items():

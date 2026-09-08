@@ -338,6 +338,50 @@ code {
 .vendor-dc-table td:first-child {
   min-width: 260px;
 }
+.vendor-dc-table td, .vendor-dc-table th {
+  vertical-align: middle;
+}
+/* Supplier name centered in its own column regardless of how many pill rows
+   the DC list wraps to on the left. */
+.vendor-dc-table th:nth-child(3),
+.vendor-dc-table td:nth-child(3) {
+  text-align: center;
+}
+.vendor-row-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+}
+.vendor-row-moved td {
+  color: var(--hd-medium-gray); font-style: italic; background: #fafafa;
+}
+.vendor-row-moved strong { font-style: normal; color: var(--hd-dark-gray); }
+.vendor-merged-badges {
+  display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; margin-top: 4px;
+}
+.vendor-merged-badge {
+  font-size: .68rem; font-weight: 600; color: var(--hd-medium-gray);
+  background: var(--hd-bg); border-radius: 10px; padding: 1px 8px;
+}
+
+/* "Move to..." popover — lets a supplier/SKU adopt another vendor's DC group
+   in one click, instead of dragging a row onto another (rows aren't fixed
+   drop targets, and dragging would still need a keyboard/touch fallback). */
+.move-wrap { position: relative; display: inline-block; }
+.move-pop {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; width: 220px;
+  background: #fff; border: 1px solid var(--hd-light-gray); border-radius: var(--radius);
+  box-shadow: var(--shadow-md); padding: 6px;
+}
+.move-pop-label {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .03em;
+  color: var(--hd-medium-gray); padding: 4px 8px;
+}
+.move-pop button {
+  display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px;
+  background: none; border: none; text-align: left; padding: 7px 8px; border-radius: 6px;
+  font-size: .8rem; color: var(--hd-dark-gray); cursor: pointer;
+}
+.move-pop button:hover { background: var(--hd-bg); }
+.move-pop button span { font-size: .68rem; color: var(--hd-medium-gray); }
 .vendor-dc-card {
   padding: 10px 12px;
   border: 1px solid var(--hd-light-gray);
@@ -389,6 +433,9 @@ code {
 }
 .vendor-sku-table .vendor-dc-btn {
   width: 32px; height: 26px; font-size: .68rem;
+}
+.vendor-sku-table th:last-child, .vendor-sku-table td:last-child {
+  width: 34px; text-align: right;
 }
 .vendor-sku-loading {
   padding: 10px;

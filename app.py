@@ -962,7 +962,12 @@ def api_match_vendor_strategy():
         sku_counts = work.groupby("SUPPLIER")["_THD_KEY"].nunique().to_dict()
     elif event_name:
         try:
-            q = f"""SELECT SUPPLIER, COUNT(DISTINCT THD_SKU_NBR) AS SKU_COUNT
+            # THD_SKU_NBR alone isn't a unique key — the same THD_SKU_NBR can
+            # appear under two different MVNDR_NBR (see _determine_thd_key in
+            # validators.py, used by the upload-cache path above). Count on
+            # the same composite key so this fallback doesn't undercount.
+            q = f"""SELECT SUPPLIER,
+                           COUNT(DISTINCT CONCAT(CAST(THD_SKU_NBR AS STRING), '|', CAST(MVNDR_NBR AS STRING))) AS SKU_COUNT
                     FROM {EVENTS_SKU_LIST} WHERE EVENT_NAME = @ev AND SUPPLIER IS NOT NULL
                     GROUP BY SUPPLIER"""
             jc = bigquery.QueryJobConfig(query_parameters=[
