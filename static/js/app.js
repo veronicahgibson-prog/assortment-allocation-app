@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Assortment & Allocation Automation — Frontend Wizard Logic
  */
 (() => {
@@ -1806,39 +1806,112 @@
         }
     }
 
+    function closeMovePopover() {
+        document.querySelectorAll(".move-pop").forEach(p => p.remove());
+    }
+    document.addEventListener("click", e => { if (!e.target.closest(".move-wrap")) closeMovePopover(); });
+
+    function moveTargetOptions(excludeIndex) {
+        // A vendor that's itself been moved away is just borrowing its
+        // target's DCs — not a real group to move a third vendor into.
+        return vendorMatches
+            .map((v, i) => ({ i, v }))
+            .filter(({ i, v }) => i !== excludeIndex && v._movedTo == null);
+    }
+
+    function openMovePopover(anchorButton, excludeIndex, label, onPick) {
+        closeMovePopover();
+        const options = moveTargetOptions(excludeIndex);
+        if (!options.length) { toast("No other vendor to move to yet", "error"); return; }
+        const pop = document.createElement("div");
+        pop.className = "move-pop";
+        pop.innerHTML = `<div class="move-pop-label">${label}</div>` + options.map(({ i, v }) =>
+            `<button type="button" data-target-index="${i}">${(v.VENDOR || v.SUPPLIER || "").toUpperCase()}
+                <span>${parseVendorDcs(v.DC_LIST).length} DCs</span></button>`).join("");
+        pop.querySelectorAll("button[data-target-index]").forEach(b => b.addEventListener("click", e => {
+            e.stopPropagation();
+            onPick(Number(b.dataset.targetIndex));
+            closeMovePopover();
+        }));
+        anchorButton.parentElement.appendChild(pop);
+    }
+
+    function applyVendorMove(matchIndex, targetIndex) {
+        const src = vendorMatches[matchIndex], tgt = vendorMatches[targetIndex];
+        if (!src || !tgt) return;
+        // The DC/SKU data actually moves (needed for /api/submit_cost_model
+        // to assign these SKUs to the target's DCs) — _movedTo is purely a
+        // display flag so the source collapses into the target's row instead
+        // of sitting there as its own row with borrowed DCs.
+        const targetDcs = parseVendorDcs(tgt.DC_LIST);
+        const rehome = m => {
+            m.DC_LIST = targetDcs.join(", ");
+            m.DC_COUNT = targetDcs.length;
+            m.DC_NM_LIST = tgt.DC_NM_LIST;
+            m._movedTo = targetIndex;
+        };
+        rehome(src);
+        // Cascade: anyone already merged into src follows it to its new
+        // target — moving "DEWALT (+ BOSCH)" into MAKITA becomes
+        // "MAKITA (+ DEWALT, + BOSCH)" instead of leaving BOSCH pointing at
+        // a DEWALT row that's now itself just a pointer to MAKITA.
+        vendorMatches.forEach(m => { if (m._movedTo === matchIndex) rehome(m); });
+        toast(`${(src.VENDOR || src.SUPPLIER || "").toUpperCase()} moved under ${(tgt.VENDOR || tgt.SUPPLIER || "").toUpperCase()}`, "success");
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
+    function undoVendorMove(matchIndex) {
+        const src = vendorMatches[matchIndex];
+        if (!src) return;
+        const initialDcs = parseVendorDcs(src._initialDcList);
+        src.DC_LIST = initialDcs.join(", ");
+        src.DC_COUNT = initialDcs.length;
+        src.DC_NM_LIST = src._initialDcNames;
+        delete src._movedTo;
+        toast(`${(src.VENDOR || src.SUPPLIER || "").toUpperCase()} restored to its own DC group`, "success");
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
     // Repaints one already-rendered SKU row's DC buttons/count/override badge
     // in place, without a network round trip. THD_SKU_NBR/SKU_DESC/units/cube
-    // don't change when a DC override is toggled — only the client-side
-    // SKU_OVERRIDES state does — so there's nothing here that
+    // don't change when a DC override is toggled or a SKU is moved — only the
+    // client-side SKU_OVERRIDES state does — so there's nothing here that
     // /api/vendor_skus needs to be asked about again, unlike the initial page
     // load or paging to a different set of SKUs.
-    function rerenderVendorSkuRow(matchIndex, skuKey) {
-        const match = vendorMatches[matchIndex];
-        const container = $(`#vendor-skus-${matchIndex}`);
-        if (!match || !container) return;
+    // groupIndex is whichever vendor's "View SKUs" panel is open (the
+    // #vendor-skus-N container to find/patch); ownerIndex is whichever
+    // vendor's SUPPLIER this particular SKU row actually belongs to — the
+    // same vendor for a normal row, but a merged-in vendor (see "Move
+    // to...") for a row pulled in from its group. SKU_OVERRIDES always
+    // lives on the owner, since that's what /api/submit_cost_model reads.
+    function rerenderVendorSkuRow(groupIndex, ownerIndex, skuKey) {
+        const group = vendorMatches[groupIndex];
+        const owner = vendorMatches[ownerIndex];
+        const container = $(`#vendor-skus-${groupIndex}`);
+        if (!group || !owner || !container) return;
         const row = container.querySelector(`tr[data-sku-key="${CSS.escape(String(skuKey))}"]`);
         if (!row) return;
 
-        const defaultDcs = parseVendorDcs(match.DC_LIST);
-        const names = parseVendorNames(match._initialDcNames);
-        const selectedDcs = parseVendorDcs(match.SKU_OVERRIDES[skuKey] || match.DC_LIST);
+        const defaultDcs = parseVendorDcs(group.DC_LIST);
+        const names = parseVendorNames(group._initialDcNames);
+        const selectedDcs = parseVendorDcs(owner.SKU_OVERRIDES[skuKey] || owner.DC_LIST);
 
         const btnCell = row.querySelector(".vendor-dc-buttons");
         if (btnCell) {
-            btnCell.innerHTML = renderDcButtonGrid(matchIndex, defaultDcs, names, selectedDcs, {
+            btnCell.innerHTML = renderDcButtonGrid(groupIndex, defaultDcs, names, selectedDcs, {
                 extraClass: " vendor-sku-dc-btn",
-                dataAttrs: ` data-sku-key="${skuKey}"`,
+                dataAttrs: ` data-sku-key="${skuKey}" data-owner-index="${ownerIndex}"`,
             });
             btnCell.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
                 button.addEventListener("click", () => toggleVendorSkuDc(
-                    Number(button.dataset.matchIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
+                    Number(button.dataset.matchIndex), Number(button.dataset.ownerIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
                 ));
             });
         }
 
         const overrideHolder = btnCell?.parentElement;
         const existingBadge = overrideHolder?.querySelector(".vendor-sku-override");
-        const hasOverride = !!match.SKU_OVERRIDES[skuKey];
+        const hasOverride = !!owner.SKU_OVERRIDES[skuKey];
         if (hasOverride && !existingBadge) {
             overrideHolder.insertAdjacentHTML("beforeend", '<span class="vendor-sku-override">Override</span>');
         } else if (!hasOverride && existingBadge) {
@@ -1849,21 +1922,33 @@
         if (countCell) countCell.textContent = selectedDcs.length;
     }
 
-    function toggleVendorSkuDc(matchIndex, skuKey, dcNbr) {
-        const match = vendorMatches[matchIndex];
-        if (!match) return;
-        match.SKU_OVERRIDES = match.SKU_OVERRIDES || {};
-        const selected = parseVendorDcs(match.SKU_OVERRIDES[skuKey] || match.DC_LIST);
+    function applySkuMove(groupIndex, ownerIndex, skuKey, targetIndex) {
+        const owner = vendorMatches[ownerIndex], target = vendorMatches[targetIndex];
+        if (!owner || !target) return;
+        owner.SKU_OVERRIDES = owner.SKU_OVERRIDES || {};
+        const targetDcs = parseVendorDcs(target.DC_LIST);
+        const defaults = parseVendorDcs(owner.DC_LIST);
+        if (targetDcs.join(",") === defaults.join(",")) delete owner.SKU_OVERRIDES[skuKey];
+        else owner.SKU_OVERRIDES[skuKey] = targetDcs;
+        toast(`SKU moved to ${(target.VENDOR || target.SUPPLIER || "").toUpperCase()}'s DC group`, "success");
+        rerenderVendorSkuRow(groupIndex, ownerIndex, skuKey);
+    }
+
+    function toggleVendorSkuDc(groupIndex, ownerIndex, skuKey, dcNbr) {
+        const owner = vendorMatches[ownerIndex];
+        if (!owner) return;
+        owner.SKU_OVERRIDES = owner.SKU_OVERRIDES || {};
+        const selected = parseVendorDcs(owner.SKU_OVERRIDES[skuKey] || owner.DC_LIST);
         if (selected.length === 1 && selected[0] === dcNbr) {
             toast("Each SKU must have at least one DC selected", "error");
             return;
         }
         const next = selected.includes(dcNbr) ? selected.filter(dc => dc !== dcNbr) : [...selected, dcNbr];
         next.sort((a, b) => a - b);
-        const defaults = parseVendorDcs(match.DC_LIST);
-        if (next.join(",") === defaults.join(",")) delete match.SKU_OVERRIDES[skuKey];
-        else match.SKU_OVERRIDES[skuKey] = next;
-        rerenderVendorSkuRow(matchIndex, skuKey);
+        const defaults = parseVendorDcs(owner.DC_LIST);
+        if (next.join(",") === defaults.join(",")) delete owner.SKU_OVERRIDES[skuKey];
+        else owner.SKU_OVERRIDES[skuKey] = next;
+        rerenderVendorSkuRow(groupIndex, ownerIndex, skuKey);
     }
 
     // Per-supplier rollup of the vendor-strategy match: SKU count comes from
