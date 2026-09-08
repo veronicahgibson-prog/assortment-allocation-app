@@ -1422,6 +1422,10 @@
         // Load DC counts button
         $("#btnLoadDcCounts")?.addEventListener("click", loadAvailableDcCounts);
 
+        // DC eligibility check (VENDOR_ALIGNED) — needs RUN_ID, which only exists
+        // once the user's entered it here in Step 3, not back on Step 2.
+        $("#btnCheckDcEligibility")?.addEventListener("click", loadDcEligibility);
+
         // Campus pairing
         $("#btnCampusYes")?.addEventListener("click", () => {
             $("#campusSelection").style.display = "block";
@@ -1896,11 +1900,14 @@
 
     function vendorSkuDcs(match, row) {
         const overrides = match.SKU_OVERRIDES || {};
-        // Keyed by THD_SKU_NBR (not THD_KEY) so the override survives a round
-        // trip through /api/submit_cost_model, which resolves it against
-        // EVENTS_SKU_LIST.THD_SKU_NBR directly — a composite client-side key
-        // can't be reconstructed on the BigQuery side.
-        return parseVendorDcs(overrides[row.THD_SKU_NBR] || match.DC_LIST);
+        // Keyed by THD_KEY (THD_SKU_NBR plus whatever else — usually
+        // MVNDR_NBR — actually makes this upload's rows distinct), not bare
+        // THD_SKU_NBR: the same THD SKU can appear more than once (e.g. two
+        // different MVNDR NBRs), and keying by THD_SKU_NBR alone made an
+        // override on one of those rows silently apply to all of them. The
+        // backend reconstructs the identical composite key from a fresh
+        // EVENTS_SKU_LIST query — see _compute_vendor_aligned_submission_rows.
+        return parseVendorDcs(overrides[row.THD_KEY] || match.DC_LIST);
     }
 
     async function toggleVendorSkuRows(matchIndex) {
@@ -1938,6 +1945,14 @@
             const allRows = [];
             fetches.forEach((r, oi) => (r.rows || []).forEach(row => allRows.push({ row, owner: owners[oi] })));
 
+            // Whatever beyond THD_SKU_NBR actually distinguishes two rows for
+            // the same THD SKU (e.g. MVNDR_NBR when it's sourced from more
+            // than one vendor) — without this, two rows for THD 1011513312
+            // are visually identical and there's no way to tell which one a
+            // DC toggle is about to change.
+            const extraKeyCols = [...new Set(fetches.flatMap(r => r.extra_key_cols || []))];
+            const extraHeaders = extraKeyCols.map(f => `<th>${KEY_FIELD_LABELS[f] || f}</th>`).join("");
+
             const DISPLAY_PAGE_SIZE = 50;
             const totalPages = Math.max(1, Math.ceil(allRows.length / DISPLAY_PAGE_SIZE));
             const clampedPage = Math.min(Math.max(page, 1), totalPages);
@@ -1945,20 +1960,21 @@
 
             const defaultDcs = parseVendorDcs(match.DC_LIST);
             let html = `<table class="detail-table vendor-sku-table"><thead><tr>
-                <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
+                <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th>${extraHeaders}<th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
             pageRows.forEach(({ row, owner }) => {
                 const selectedDcs = vendorSkuDcs(owner.match, row);
-                html += `<tr data-sku-key="${row.THD_SKU_NBR}"><td><div class="vendor-dc-buttons">
+                const extraCells = extraKeyCols.map(f => `<td>${row[f] || "—"}</td>`).join("");
+                html += `<tr data-sku-key="${row.THD_KEY}"><td><div class="vendor-dc-buttons">
                     ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
-                        dataAttrs: ` data-sku-key="${row.THD_SKU_NBR}" data-owner-index="${owner.index}"`,
+                        dataAttrs: ` data-sku-key="${row.THD_KEY}" data-owner-index="${owner.index}"`,
                     })}
-                    </div>${owner.match.SKU_OVERRIDES[row.THD_SKU_NBR] ? '<span class="vendor-sku-override">Override</span>' : ""}</td>
+                    </div>${owner.match.SKU_OVERRIDES[row.THD_KEY] ? '<span class="vendor-sku-override">Override</span>' : ""}</td>
                     <td class="vendor-sku-count">${selectedDcs.length}</td>
                     <td>${(owner.match.VENDOR || owner.match.SUPPLIER || "").toUpperCase()}</td>
-                    <td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td><td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td>
+                    <td>${row.THD_SKU_NBR || "—"}</td><td>${row.SKU_DESC || "—"}</td>${extraCells}<td>${row.TOTAL_UNITS || "—"}</td><td>${row.TOTAL_CUBE || "—"}</td>
                     <td><div class="move-wrap">
-                        <button type="button" class="btn btn-sm btn-secondary vendor-sku-move-btn" data-match-index="${matchIndex}" data-owner-index="${owner.index}" data-sku-key="${row.THD_SKU_NBR}" title="Move this SKU to another vendor's DC group">⋯</button>
+                        <button type="button" class="btn btn-sm btn-secondary vendor-sku-move-btn" data-match-index="${matchIndex}" data-owner-index="${owner.index}" data-sku-key="${row.THD_KEY}" title="Move this SKU to another vendor's DC group">⋯</button>
                     </div></td></tr>`;
             });
             html += `</tbody></table><div class="vendor-sku-footer"><button type="button" class="btn btn-sm btn-secondary vendor-sku-hide"><i class="fas fa-chevron-up"></i> Hide SKUs</button> Page ${clampedPage} of ${totalPages} · ${allRows.length} SKU(s)${truncated ? " — one or more suppliers truncated at 100 rows" : ""}`;
@@ -2308,6 +2324,102 @@
     }
 
     let availableDcOptions = [];
+
+    async function loadDcEligibility() {
+        const runId = $("#stratRunId")?.value?.trim() || "";
+        if (!runId) {
+            toast("Run ID is required", "error");
+            return;
+        }
+        const container = $("#dcEligibilityResults");
+        container.style.display = "block";
+        container.innerHTML = `<div style="color:var(--hd-medium-gray);font-size:0.85rem"><i class="fas fa-spinner fa-spin"></i> Checking DC eligibility…</div>`;
+        try {
+            const result = await api("/api/check_dc_eligibility", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    run_id: runId,
+                    event_name: eventName,
+                    sku_grp: $("#stratSkuGrp")?.value?.trim() || "",
+                }),
+            });
+            if (result.error) throw new Error(result.error);
+            renderDcEligibility(result.conflicts || []);
+        } catch (e) {
+            container.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.9rem">
+                <i class="fas fa-times-circle"></i> ${e.message}
+            </div>`;
+        }
+    }
+
+    function renderDcEligibility(conflicts) {
+        const container = $("#dcEligibilityResults");
+        if (!conflicts.length) {
+            container.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.9rem">
+                <i class="fas fa-check-circle"></i> No DC eligibility conflicts found for the current selections.
+            </div>`;
+            return;
+        }
+        container.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.9rem;margin-bottom:8px">
+                <i class="fas fa-triangle-exclamation"></i> ${conflicts.length} SKU(s) have no eligible catalog assortment for their chosen DCs
+            </div>` + conflicts.map((c, i) => {
+            const ineligibleList = c.ineligible.length
+                ? c.ineligible.map(x => `${x.dc_nbr} (${x.reason})`).join("; ")
+                : "no specific reason found in OBC_CTLG_SKU_DC for this run";
+            const altButtons = c.eligible_alternatives.slice(0, 8).map(dc =>
+                `<button type="button" class="btn btn-sm btn-secondary dc-elig-add" data-idx="${i}" data-dc="${dc}" style="margin:2px">+ ${dc}</button>`
+            ).join("");
+            return `<div style="border:1px solid var(--hd-light-gray);border-radius:6px;padding:10px 12px;margin-bottom:8px">
+                <strong>SKU ${c.sku_nbr}</strong> — ${c.supplier || "—"} — ${c.sku_desc || "—"}
+                <div style="font-size:0.82rem;color:var(--hd-medium-gray);margin:4px 0">Ineligible: ${ineligibleList}</div>
+                <div style="font-size:0.8rem;color:var(--hd-medium-gray)">Chosen DCs: ${c.chosen_dcs.join(", ")}</div>
+                <div style="margin-top:6px">
+                    <button type="button" class="btn btn-sm btn-secondary dc-elig-remove" data-idx="${i}" style="margin-right:8px">Remove ineligible DC(s)</button>
+                    ${altButtons ? `<span style="font-size:0.8rem;color:var(--hd-medium-gray)">Add eligible alternative:</span> ${altButtons}` : ""}
+                </div>
+            </div>`;
+        }).join("");
+
+        container.querySelectorAll(".dc-elig-remove").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const c = conflicts[Number(btn.dataset.idx)];
+                const ineligibleSet = new Set(c.ineligible.map(x => x.dc_nbr));
+                applyEligibilityFix(c, c.chosen_dcs.filter(dc => !ineligibleSet.has(dc)));
+            });
+        });
+        container.querySelectorAll(".dc-elig-add").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const c = conflicts[Number(btn.dataset.idx)];
+                const dc = Number(btn.dataset.dc);
+                applyEligibilityFix(c, [...new Set([...c.chosen_dcs, dc])]);
+            });
+        });
+    }
+
+    // Applies a corrected DC list for every THD_SKU_NBR under this conflict's proxy
+    // SKU_NBR (a proxy can carry more than one THD key) via the same per-SKU
+    // SKU_OVERRIDES mechanism Step 2's drill-down uses — the fix must be resubmitted
+    // via "Submit to Cost Model" (Step 2) to actually take effect on the next
+    // allocation run, since that's what writes DFC_COST_MODEL_SUBMISSION.dc_inclusions.
+    function applyEligibilityFix(conflict, newDcs) {
+        if (!conflict.thd_sku_nbrs || !conflict.thd_sku_nbrs.length) {
+            toast("Could not determine which uploaded record(s) to update", "error");
+            return;
+        }
+        const owner = vendorMatches.find(m =>
+            (m.VENDOR || m.SUPPLIER || "").toUpperCase() === (conflict.supplier || "").toUpperCase());
+        if (!owner) {
+            toast("Run vendor matching first (Step 2) before fixing eligibility here", "error");
+            return;
+        }
+        owner.SKU_OVERRIDES = owner.SKU_OVERRIDES || {};
+        for (const thdSku of conflict.thd_sku_nbrs) {
+            owner.SKU_OVERRIDES[thdSku] = newDcs;
+        }
+        toast(`Updated SKU ${conflict.sku_nbr} to ${newDcs.length} DC(s) — resubmit Cost Model on Step 2 for this to take effect`, "success");
+        loadDcEligibility();
+    }
 
     async function loadAvailableDcCounts(mode = "multi") {
         const runId = $("#stratRunId")?.value?.trim() || "";

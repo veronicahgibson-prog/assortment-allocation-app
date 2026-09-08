@@ -206,6 +206,17 @@
                     <input type="text" id="stratEmail" class="form-input" style="font-size:0.85rem" />
                 </div>
             </div>
+
+            <!-- Flags SKUs whose currently-submitted DC selection has no eligible
+                 catalog assortment (e.g. "Bulk SKU must go to Bulk Building") once
+                 RUN_ID is known — surfaced here instead of only showing up in the
+                 post-allocation UNALLOCATED_RECORDS report. -->
+            <div style="margin-top:16px">
+                <button class="btn btn-sm btn-secondary" id="btnCheckDcEligibility">
+                    <i class="fas fa-clipboard-check"></i> Check DC Eligibility
+                </button>
+            </div>
+            <div id="dcEligibilityResults" style="display:none;margin-top:12px"></div>
         </div>
         <div id="lowVolumeAlert" style="display:none;margin-bottom:16px"></div>
         <div class="wizard-nav">
@@ -661,6 +672,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=322"></script>
+    <script src="/static/js/app.js?v=324"></script>
 </body>
 </html>

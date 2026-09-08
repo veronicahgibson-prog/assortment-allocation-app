@@ -26,7 +26,7 @@ from config import (
 )
 from validators import validate_upload, _determine_thd_key
 from assortment_engine import determine_assortment_ids, start_multi_dc, fetch_multi_dc_results
-from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_factory_summary, is_import_run
+from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_factory_summary, is_import_run, check_vendor_dc_eligibility
 from event_history import fetch_prior_year_strategy, fetch_known_event_names
 
 app = Flask(__name__)
@@ -1212,6 +1212,11 @@ def api_vendor_skus():
     rows_df = df.loc[supplier_mask].copy()
     key_cols = [c for c in _determine_thd_key(df, _upload_cache.get("includes_imports", False)) if c in df.columns]
     rows_df["THD_KEY"] = rows_df[key_cols].fillna("__NULL__").astype(str).agg("|".join, axis=1)
+    # Whatever beyond THD_SKU_NBR actually makes two rows for the same THD SKU
+    # distinct (e.g. MVNDR_NBR when it's sourced from more than one vendor) —
+    # returned per-row below so the UI can label which row is which instead of
+    # showing an opaque pipe-joined THD_KEY.
+    extra_key_cols = [c for c in key_cols if c != "THD_SKU_NBR"]
     total = len(rows_df)
     start = (page - 1) * page_size
 
@@ -1256,7 +1261,8 @@ def api_vendor_skus():
     rows = []
     for _, row in rows_df.iloc[start:start + page_size].iterrows():
         item = {}
-        for col in ["THD_KEY", "THD_SKU_NBR", "SISTER_SKU_NBR", "SKU_DESC", "BP", "BUY_UNITS", "WAVE_1", "WAVE_2", "WAVE_3", "WAVE_4", "WAVE_5"]:
+        for col in ["THD_KEY", "THD_SKU_NBR", "SISTER_SKU_NBR", "SKU_DESC", "BP", "BUY_UNITS",
+                    "WAVE_1", "WAVE_2", "WAVE_3", "WAVE_4", "WAVE_5", *extra_key_cols]:
             if col not in row.index:
                 continue
             value = row[col]
@@ -1266,7 +1272,10 @@ def api_vendor_skus():
         item["TOTAL_UNITS"] = str(int(buy_units)) if buy_units else ""
         item["TOTAL_CUBE"] = f"{item_cubes.get(sku_nbr, 0) * buy_units:.2f}" if sku_nbr else ""
         rows.append(item)
-    return jsonify({"rows": rows, "page": page, "page_size": page_size, "total": total, "pages": (total + page_size - 1) // page_size})
+    return jsonify({
+        "rows": rows, "page": page, "page_size": page_size, "total": total,
+        "pages": (total + page_size - 1) // page_size, "extra_key_cols": extra_key_cols,
+    })
 
 
 @app.route("/api/cost_model_preview", methods=["POST"])
@@ -1456,25 +1465,53 @@ def _parse_dc_list(dc_list_str):
     return nbrs or None
 
 
+# EVENTS_SKU_LIST stores wave data as W1_UNITS..W5_UNITS, not WAVE_1..WAVE_5 —
+# only relevant if _determine_thd_key ever has to fall back that far to
+# disambiguate rows (MVNDR_NBR alone covers the common case).
+_THD_KEY_COL_TO_EVENTS_SKU_LIST = {f"WAVE_{n}": f"W{n}_UNITS" for n in range(1, 6)}
+
+
 def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vendor_matches):
     """One row per (SKU_NBR, effective DC list): a SKU_NBR normally rolls up
-    under its supplier's matched DC_LIST, but a THD_SKU_NBR carrying a
-    per-SKU override (Step 2's SKU drill-down) breaks out into its own row
-    whenever that override differs from the rest of its SKU_NBR family."""
+    under its supplier's matched DC_LIST, but a THD_KEY (THD_SKU_NBR, plus
+    whatever else — usually MVNDR_NBR — actually makes an upload's rows
+    distinct; see _determine_thd_key) carrying a per-SKU override (Step 2's
+    SKU drill-down) breaks out into its own row whenever that override
+    differs from the rest of its SKU_NBR family.
+
+    THD_SKU_NBR alone is NOT always a unique row identifier — the same THD
+    SKU can appear more than once (e.g. sourced from two different MVNDR
+    NBRs), so matching overrides against it alone silently applies one
+    row's override to every row sharing that THD_SKU_NBR. Instead this uses
+    the same composite key (pipe-joined key_cols, "__NULL__" for missing
+    values) that /api/vendor_skus already builds as THD_KEY and that the
+    frontend now uses as the SKU_OVERRIDES key — reconstructed here from a
+    fresh EVENTS_SKU_LIST query using the exact same key_cols so the two
+    sides agree on which row is which."""
     default_dcs_by_supplier = {}
-    overrides_by_thd_sku = {}
+    overrides_by_key = {}
     for m in vendor_matches:
         supplier = (m.get("SUPPLIER") or "").strip()
         if supplier:
             default_dcs_by_supplier[supplier] = _parse_dc_list(m.get("DC_LIST"))
-        for thd_sku, dcs in (m.get("SKU_OVERRIDES") or {}).items():
+        for thd_key, dcs in (m.get("SKU_OVERRIDES") or {}).items():
             try:
-                overrides_by_thd_sku[int(thd_sku)] = sorted({int(d) for d in dcs})
+                overrides_by_key[str(thd_key)] = sorted({int(d) for d in dcs})
             except (TypeError, ValueError):
                 continue
 
+    upload_df = _upload_cache.get("df")
+    key_cols = _determine_thd_key(upload_df, _upload_cache.get("includes_imports", False)) if upload_df is not None else ["THD_SKU_NBR"]
+    # SKU_NBR/SUPPLIER/BUY_UNITS are already selected below unconditionally —
+    # _determine_thd_key can (rarely) include SUPPLIER or BUY_UNITS itself as
+    # a disambiguating column, which would otherwise select the same column
+    # twice.
+    base_cols = {"SKU_NBR", "SUPPLIER", "BUY_UNITS"}
+    extra_key_cols = [c for c in key_cols if c not in base_cols]
+    sql_cols = [f"{_THD_KEY_COL_TO_EVENTS_SKU_LIST.get(c, c)} AS {c}" for c in extra_key_cols]
+
     rows = bq().query(f"""
-        SELECT SKU_NBR, THD_SKU_NBR, SUPPLIER, BUY_UNITS
+        SELECT SKU_NBR, SUPPLIER, BUY_UNITS{"".join(f", {c}" for c in sql_cols)}
         FROM {EVENTS_SKU_LIST}
         WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
     """, job_config=bigquery.QueryJobConfig(query_parameters=[
@@ -1484,7 +1521,8 @@ def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vend
 
     groups = {}
     for r in rows:
-        dc_list = overrides_by_thd_sku.get(r.THD_SKU_NBR) or default_dcs_by_supplier.get((r.SUPPLIER or "").strip())
+        thd_key = "|".join("__NULL__" if getattr(r, c) is None else str(getattr(r, c)) for c in key_cols)
+        dc_list = overrides_by_key.get(thd_key) or default_dcs_by_supplier.get((r.SUPPLIER or "").strip())
         key = (r.SKU_NBR, tuple(dc_list) if dc_list else None)
         groups[key] = groups.get(key, 0) + (r.BUY_UNITS or 0)
 
@@ -1969,6 +2007,27 @@ def api_available_dc_counts():
     if not result.get("success"):
         return jsonify(result), 500
     return jsonify(result)
+
+
+@app.route("/api/check_dc_eligibility", methods=["POST"])
+def api_check_dc_eligibility():
+    """VENDOR_ALIGNED only: flags SKUs whose currently-submitted DC selection
+    (DFC_COST_MODEL_SUBMISSION.dc_inclusions) has no matching CAMP_ASMT_ID for
+    the given catalog run, with the specific OBC_CTLG_SKU_DC ineligibility
+    reason and eligible alternative DCs — surfaced in Step 3 once RUN_ID is
+    known, rather than only showing up in UNALLOCATED_RECORDS after a run."""
+    body = request.get_json(silent=True) or {}
+    run_id = body.get("run_id", "")
+    event_name = body.get("event_name", "")
+    if not run_id or not event_name:
+        return jsonify({"error": "run_id and event_name are required"}), 400
+    sku_grp = _resolve_sku_grp(run_id, event_name, default=body.get("sku_grp", ""))
+    try:
+        conflicts = check_vendor_dc_eligibility(bq(), run_id, sku_grp, event_name)
+        return jsonify({"conflicts": conflicts})
+    except Exception as e:
+        logger.exception("DC eligibility check error")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/run_allocation", methods=["POST"])
