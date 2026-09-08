@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Assortment & Allocation Automation — Frontend Wizard Logic
  */
 (() => {
@@ -387,8 +387,8 @@
             const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
             let html = `<div class="prior-strategy-card">
                 <div class="prior-strategy-heading">
-                    <div><span class="prior-strategy-kicker">${result.event_name} ${result.event_year}${eventTypeLabel ? " " + eventTypeLabel : ""}</span>
-                        <h4><i class="fas fa-clock-rotate-left"></i> ${strategyLabel}</h4></div>
+                    <div><span class="prior-strategy-kicker">${strategyLabel}</span>
+                        <h4><i class="fas fa-calendar-days"></i> ${result.event_name} <span style="color:var(--hd-orange)">${result.event_year}</span>${eventTypeLabel ? " " + eventTypeLabel : ""}</h4></div>
                     <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
                 </div>
                 <div class="prior-strategy-metrics">
@@ -1273,17 +1273,19 @@
         $("#btnShowAddVendorStrategy")?.addEventListener("click", () => {
             pickedVendorStrategyDcs = new Set();
             renderVendorStrategyDcPicker();
-            populateVendorStrategyNameOptions();
+            renderAddVendorStrategyNameOptions();
             $("#addVendorStrategyForm").style.display = "block";
-            $("#newVendorStrategyName")?.focus();
         });
         $("#btnCancelAddVendorStrategy")?.addEventListener("click", () => {
             $("#addVendorStrategyForm").style.display = "none";
         });
-        $("#newVendorStrategyName")?.addEventListener("change", e => {
-            const isCustom = e.target.value === "__custom__";
-            $("#newVendorStrategyNameCustom").style.display = isCustom ? "block" : "none";
-            if (isCustom) $("#newVendorStrategyNameCustom").focus();
+        $("#newVendorStrategyName")?.addEventListener("change", () => {
+            const isOther = $("#newVendorStrategyName").value === "__other__";
+            const custom = $("#newVendorStrategyNameCustom");
+            if (custom) {
+                custom.style.display = isOther ? "block" : "none";
+                if (isOther) custom.focus();
+            }
         });
         $("#btnSaveVendorStrategy")?.addEventListener("click", saveVendorStrategy);
 
@@ -1593,30 +1595,12 @@
 
     let pickedVendorStrategyDcs = new Set();
 
-    // vendorMatches already carries one entry per distinct SUPPLIER from this
-    // upload (populated by matchVendorStrategy()) — reuse it instead of a
-    // separate round trip, so the list includes suppliers currently falling
-    // back to OTHER, which is exactly who this form exists to fix.
-    function populateVendorStrategyNameOptions() {
-        const select = $("#newVendorStrategyName");
-        if (!select) return;
-        const suppliers = [...new Set(vendorMatches.map(m => (m.SUPPLIER || "").trim()).filter(Boolean))]
-            .sort((a, b) => a.localeCompare(b));
-        const escape = s => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-        select.innerHTML = `<option value="">Select a supplier from this upload…</option>`
-            + suppliers.map(s => `<option value="${escape(s)}">${escape(s)}</option>`).join("")
-            + `<option value="__custom__">Other (type a name)…</option>`;
-        $("#newVendorStrategyNameCustom").style.display = "none";
-        $("#newVendorStrategyNameCustom").value = "";
-    }
-
     function renderVendorStrategyDcPicker() {
         const el = $("#newVendorStrategyDcPicker");
         if (!el) return;
         el.innerHTML = ALL_DCS.map(dc => {
             const active = pickedVendorStrategyDcs.has(dc.nbr);
-            const style = active ? ` style="background:${dcFill(dc.nbr)};color:#fff;border-color:${dcFill(dc.nbr)}"` : "";
-            return `<button type="button" class="dc-toggle-btn vendor-dc-btn${active ? " active" : ""}"${style}
+            return `<button type="button" class="dc-toggle-btn vendor-dc-btn${active ? " active" : ""}"
                 data-dc-nbr="${dc.nbr}" title="${dc.name}">${dc.nbr}</button>`;
         }).join("");
         el.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
@@ -1626,10 +1610,34 @@
         }));
     }
 
+    // Populates the "Add Vendor Strategy" name field from this upload's
+    // distinct suppliers (vendorMatches) instead of free text, so a new
+    // strategy always attaches to a real supplier on the current event.
+    // Each option is labeled with the VENDOR_ALIGNED_STRATEGY name it
+    // currently resolves to (often "OTHER") and flagged with ⚠ when it's
+    // only getting the generic fallback — so a supplier like "ALLEY CAT"
+    // that has no dedicated strategy yet is easy to pick out and fix.
+    function renderAddVendorStrategyNameOptions() {
+        const select = $("#newVendorStrategyName");
+        const custom = $("#newVendorStrategyNameCustom");
+        if (!select) return;
+        const seen = new Set();
+        const options = vendorMatches
+            .map(m => ({ supplier: (m.SUPPLIER || "").trim(), current: (m.VENDOR || "OTHER").toUpperCase() }))
+            .filter(o => o.supplier && !seen.has(o.supplier) && seen.add(o.supplier))
+            .sort((a, b) => a.supplier.localeCompare(b.supplier));
+        select.innerHTML = `<option value="">Select a supplier from this upload…</option>`
+            + options.map(o => `<option value="${o.supplier}">${o.current === "OTHER" ? "⚠ " : ""}${o.supplier} — currently: ${o.current}</option>`).join("")
+            + `<option value="__other__">+ Enter a different vendor name…</option>`;
+        select.value = "";
+        if (custom) { custom.style.display = "none"; custom.value = ""; }
+    }
+
     async function saveVendorStrategy() {
-        const selected = $("#newVendorStrategyName")?.value.trim();
-        const name = selected === "__custom__" ? $("#newVendorStrategyNameCustom")?.value.trim() : selected;
-        if (!name) { toast("Enter a vendor name", "error"); return; }
+        const select = $("#newVendorStrategyName");
+        const isOther = select?.value === "__other__";
+        const name = (isOther ? $("#newVendorStrategyNameCustom")?.value : select?.value || "").trim();
+        if (!name) { toast("Select or enter a vendor name", "error"); return; }
         if (!pickedVendorStrategyDcs.size) { toast("Select at least one DC", "error"); return; }
         showLoading("Adding vendor strategy…");
         try {
@@ -1640,9 +1648,6 @@
             });
             toast(result.message || `Added ${name.toUpperCase()}`, "success");
             $("#addVendorStrategyForm").style.display = "none";
-            $("#newVendorStrategyName").value = "";
-            $("#newVendorStrategyNameCustom").value = "";
-            $("#newVendorStrategyNameCustom").style.display = "none";
             pickedVendorStrategyDcs = new Set();
             // Re-run matching so this event's suppliers (including ones
             // currently falling back to OTHER) pick up the new vendor row.
@@ -1810,9 +1815,9 @@
 
             const defaultDcs = parseVendorDcs(match.DC_LIST);
             let html = `<table class="detail-table vendor-sku-table"><thead><tr>
-                <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th><th></th></tr></thead><tbody>`;
-            pageRows.forEach(({ row, owner }) => {
-                const selectedDcs = vendorSkuDcs(owner.match, row);
+                <th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>THD SKU NBR</th><th>SKU Description</th><th>Total Units</th><th>Total Cube</th></tr></thead><tbody>`;
+            result.rows.forEach(row => {
+                const selectedDcs = vendorSkuDcs(match, row);
                 html += `<tr data-sku-key="${row.THD_SKU_NBR}"><td><div class="vendor-dc-buttons">
                     ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
@@ -1856,11 +1861,6 @@
         }
     }
 
-    // "Move to..." lets a supplier (or, per-SKU below, one SKU) adopt another
-    // vendor's DC group wholesale, without hand-toggling each pill — the
-    // alternative to dragging a row onto another one, since the rows aren't
-    // fixed drop targets and dragging would need its own keyboard/touch
-    // fallback for the same result this already gives with a click.
     function closeMovePopover() {
         document.querySelectorAll(".move-pop").forEach(p => p.remove());
     }
