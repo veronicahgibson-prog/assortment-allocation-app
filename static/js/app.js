@@ -1218,11 +1218,17 @@
         $("#btnShowAddVendorStrategy")?.addEventListener("click", () => {
             pickedVendorStrategyDcs = new Set();
             renderVendorStrategyDcPicker();
+            populateVendorStrategyNameOptions();
             $("#addVendorStrategyForm").style.display = "block";
             $("#newVendorStrategyName")?.focus();
         });
         $("#btnCancelAddVendorStrategy")?.addEventListener("click", () => {
             $("#addVendorStrategyForm").style.display = "none";
+        });
+        $("#newVendorStrategyName")?.addEventListener("change", e => {
+            const isCustom = e.target.value === "__custom__";
+            $("#newVendorStrategyNameCustom").style.display = isCustom ? "block" : "none";
+            if (isCustom) $("#newVendorStrategyNameCustom").focus();
         });
         $("#btnSaveVendorStrategy")?.addEventListener("click", saveVendorStrategy);
 
@@ -1532,6 +1538,23 @@
 
     let pickedVendorStrategyDcs = new Set();
 
+    // vendorMatches already carries one entry per distinct SUPPLIER from this
+    // upload (populated by matchVendorStrategy()) — reuse it instead of a
+    // separate round trip, so the list includes suppliers currently falling
+    // back to OTHER, which is exactly who this form exists to fix.
+    function populateVendorStrategyNameOptions() {
+        const select = $("#newVendorStrategyName");
+        if (!select) return;
+        const suppliers = [...new Set(vendorMatches.map(m => (m.SUPPLIER || "").trim()).filter(Boolean))]
+            .sort((a, b) => a.localeCompare(b));
+        const escape = s => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+        select.innerHTML = `<option value="">Select a supplier from this upload…</option>`
+            + suppliers.map(s => `<option value="${escape(s)}">${escape(s)}</option>`).join("")
+            + `<option value="__custom__">Other (type a name)…</option>`;
+        $("#newVendorStrategyNameCustom").style.display = "none";
+        $("#newVendorStrategyNameCustom").value = "";
+    }
+
     function renderVendorStrategyDcPicker() {
         const el = $("#newVendorStrategyDcPicker");
         if (!el) return;
@@ -1549,7 +1572,8 @@
     }
 
     async function saveVendorStrategy() {
-        const name = $("#newVendorStrategyName")?.value.trim();
+        const selected = $("#newVendorStrategyName")?.value.trim();
+        const name = selected === "__custom__" ? $("#newVendorStrategyNameCustom")?.value.trim() : selected;
         if (!name) { toast("Enter a vendor name", "error"); return; }
         if (!pickedVendorStrategyDcs.size) { toast("Select at least one DC", "error"); return; }
         showLoading("Adding vendor strategy…");
@@ -1562,6 +1586,8 @@
             toast(result.message || `Added ${name.toUpperCase()}`, "success");
             $("#addVendorStrategyForm").style.display = "none";
             $("#newVendorStrategyName").value = "";
+            $("#newVendorStrategyNameCustom").value = "";
+            $("#newVendorStrategyNameCustom").style.display = "none";
             pickedVendorStrategyDcs = new Set();
             // Re-run matching so this event's suppliers (including ones
             // currently falling back to OTHER) pick up the new vendor row.
@@ -2045,9 +2071,20 @@
                 : "";
             const combinedSkuCount = Number(m.SKU_COUNT || 0) + mergedHere.reduce((sum, mv) => sum + Number(mv.SKU_COUNT || 0), 0);
 
+            // A per-SKU override (this group's own, or one carried by a
+            // merged-in supplier) can put a SKU on a smaller DC count than
+            // the group's default — show the collapsed row as a range
+            // instead of silently reporting only the default count.
+            const overrideDcCounts = [m, ...mergedHere].flatMap(owner =>
+                Object.values(owner.SKU_OVERRIDES || {}).map(dcs => parseVendorDcs(dcs).length));
+            const dcCountRange = [selectedDcs.length, ...overrideDcCounts];
+            const minDcCount = Math.min(...dcCountRange);
+            const maxDcCount = Math.max(...dcCountRange);
+            const dcCountLabel = minDcCount === maxDcCount ? String(maxDcCount) : `${minDcCount}-${maxDcCount}`;
+
             html += `<tr${isNew ? ' class="vendor-supplier-new"' : ""}><td><div class="vendor-dc-buttons">
                 ${renderDcButtonGrid(matchIndex, initialDcs, names, selectedDcs)}
-                </div></td><td class="vendor-dc-count">${selectedDcs.length}</td>
+                </div></td><td class="vendor-dc-count"${minDcCount !== maxDcCount ? ` title="One or more SKUs in this group have a per-SKU DC override"` : ""}>${dcCountLabel}</td>
                 <td><strong>${isNew ? '<i class="fas fa-plus vendor-new-icon" title="Not in a comparable last-year row"></i> ' : ""}${matchedVendor}</strong>${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
                     : ""}${mergedBadges}</td>
