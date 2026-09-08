@@ -556,6 +556,11 @@
         <div class="card">
             <h3><i class="fas fa-chart-bar"></i> Step 8: Allocation</h3>
 
+            <div id="allocCachedBanner" style="display:none;margin-bottom:14px;padding:10px 14px;border-radius:6px;background:#e7f3ff;border:1px solid #339af0;font-size:0.85rem;align-items:center;justify-content:space-between;gap:12px">
+                <span><i class="fas fa-clock-rotate-left"></i> Showing your last allocation run — configuration hasn't changed.</span>
+                <button class="btn btn-sm btn-secondary" id="btnRerunAllocation"><i class="fas fa-rotate"></i> Re-run Allocation</button>
+            </div>
+
             <!-- KPIs -->
             <div class="kpi-cards" style="margin-bottom:16px" id="resultKpis">
                 <div class="kpi-card">
@@ -645,6 +650,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=315"></script>
+    <script src="/static/js/app.js?v=316"></script>
 </body>
 </html>

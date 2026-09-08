@@ -2764,11 +2764,21 @@
     // ── Section 6: Run Allocation ──────────────────────────────────
     function setupAllocation() {
         $("#btnConfirmAsmt")?.addEventListener("click", runAllocation);
+        $("#btnRerunAllocation")?.addEventListener("click", () => {
+            forceRerunAllocation = true;
+            runAllocation();
+        });
     }
 
-    async function runAllocation() {
-        showLoading("Executing allocation procedure…");
+    // Same config-snapshot cache pattern as _executeAssortment()/
+    // lastAssortmentConfig: Back → Step 4 → Confirm again shouldn't re-run
+    // the (real, expensive) BigQuery allocation procedure just to look at
+    // the same results — only an actual change to the strategy/DC/vendor
+    // config built into `body` should trigger a fresh run.
+    let lastAllocationConfig = null;
+    let forceRerunAllocation = false;
 
+    async function runAllocation() {
         const body = {
             strategy: selectedStrategy,
             event_name: eventName,
@@ -2799,6 +2809,18 @@
             body.dc_exclusions = dcExclusions;
         }
 
+        const snapshot = JSON.stringify(body);
+        const useCache = !forceRerunAllocation && lastAllocationConfig && snapshot === lastAllocationConfig;
+        forceRerunAllocation = false; // consumed once, regardless of path taken below
+
+        if (useCache) {
+            goStep(8); // just redisplay the existing results — no reason to re-run
+            if ($("#allocCachedBanner")) $("#allocCachedBanner").style.display = "flex";
+            return;
+        }
+
+        if ($("#allocCachedBanner")) $("#allocCachedBanner").style.display = "none";
+        showLoading("Executing allocation procedure…");
         try {
             const result = await api("/api/run_allocation", {
                 method: "POST",
@@ -2808,6 +2830,7 @@
 
             if (result.success) {
                 toast("Allocation completed!", "success");
+                lastAllocationConfig = snapshot;
                 goStep(8); // straight to the renamed Allocation step, no intermediate click
             } else {
                 throw new Error(result.error || "Allocation failed");
@@ -2917,13 +2940,14 @@
         }
     }
 
-    // FACTORY_ID doesn't exist for a domestic event (factories are an
-    // import-only concept) — includesImports is set back in Step 1 and
-    // carried through as the one source of truth for that, rather than
-    // inferring it from whatever happens to come back in a given page of
-    // results.
+    // FACTORY_ID, and the FACTORY_CUBE/FACTORY_CONTAINERS totals derived from it,
+    // don't exist for a domestic event (factories are an import-only concept) —
+    // includesImports is set back in Step 1 and carried through as the one
+    // source of truth for that, rather than inferring it from whatever happens
+    // to come back in a given page of results.
+    const FACTORY_ONLY_COLUMNS = ["FACTORY_ID", "FACTORY_CUBE", "FACTORY_CONTAINERS"];
     function getVisibleResultColumns() {
-        return includesImports ? RESULT_COLUMNS : RESULT_COLUMNS.filter(c => c.key !== "FACTORY_ID");
+        return includesImports ? RESULT_COLUMNS : RESULT_COLUMNS.filter(c => !FACTORY_ONLY_COLUMNS.includes(c.key));
     }
 
     function renderResultsTable(data) {
