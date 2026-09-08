@@ -996,21 +996,30 @@
                     // what this particular upload actually collides on (e.g. MVNDR_NBR when the
                     // same THD SKU is sourced from more than one vendor).
                     const extraFields = result.thd_key_extra_fields || [];
+                    const extraHeaders = extraFields.map(f => `<th>${KEY_FIELD_LABELS[f] || f}</th>`).join("");
                     $("#mergedSkusBody").innerHTML = mergedSkus.map(m => {
-                        const sourceRows = m.sources.map(s => {
-                            const extraParts = extraFields.map(f =>
-                                `${KEY_FIELD_LABELS[f] || f} ${s.key_fields?.[f] ?? "—"}`);
-                            const detail = [
-                                `THD ${s.thd_sku_nbr ?? "—"}`,
-                                `Sister ${s.sister_sku_nbr ?? "—"}`,
-                                s.sku_desc || "—",
-                                ...extraParts,
-                            ].join(" · ");
-                            return `<div style="padding:4px 0;border-top:1px solid #ffe8a1">`
-                                + `${detail} (${fmtNum(s.buy_units)} units${s.is_sister ? ", sister-sourced" : ""})`
-                                + `</div>`;
+                        const total = m.sources.reduce((sum, s) => sum + (Number(s.buy_units) || 0), 0);
+                        const rows = m.sources.map(s => {
+                            const extraCells = extraFields.map(f => `<td>${s.key_fields?.[f] ?? "—"}</td>`).join("");
+                            return `<tr>
+                                <td>${s.thd_sku_nbr ?? "—"}</td>
+                                <td>${s.sister_sku_nbr ?? "—"}</td>
+                                <td>${s.sku_desc || "—"}</td>
+                                ${extraCells}
+                                <td style="text-align:right">${fmtNum(s.buy_units)}${s.is_sister ? " <em>(sister)</em>" : ""}</td>
+                            </tr>`;
                         }).join("");
-                        return `<div style="margin-bottom:8px"><strong>SKU ${m.sku_nbr}</strong> — ${m.sources.length} uploaded rows${sourceRows}</div>`;
+                        return `<div style="margin-bottom:14px">
+                            <div style="margin-bottom:4px"><strong>SKU ${m.sku_nbr}</strong> — ${m.sources.length} uploaded rows</div>
+                            <table class="mini-table" style="width:100%">
+                                <thead><tr><th>THD SKU</th><th>Sister SKU</th><th>SKU Description</th>${extraHeaders}<th style="text-align:right">Buy Units</th></tr></thead>
+                                <tbody>${rows}</tbody>
+                                <tfoot><tr style="font-weight:700;border-top:2px solid #856404">
+                                    <td colspan="${3 + extraFields.length}" style="text-align:right">Aggregated buy (this SKU's total):</td>
+                                    <td style="text-align:right">${fmtNum(total)}</td>
+                                </tr></tfoot>
+                            </table>
+                        </div>`;
                     }).join("");
                 }
             }
