@@ -1447,6 +1447,12 @@ def api_cost_model_preview():
             "merged_skus": merged_skus,
             "thd_key_extra_fields": extra_key_cols,
             "sister_sourced_skus": sister_sourced_skus,
+            # Lets the UI offer "Delete Previous Submission" proactively on Step 2
+            # whenever an existing submission is found — not only reactively when a
+            # fresh submit attempt 409s — so a user who already ran allocation and
+            # comes back to fix something (e.g. a DC eligibility conflict) always
+            # has the option to delete and resubmit, not just right after a failure.
+            "already_submitted": bool(existing_rows),
         })
     except Exception as e:
         logger.exception("cost_model_preview error")

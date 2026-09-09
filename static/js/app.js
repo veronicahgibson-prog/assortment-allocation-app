@@ -928,6 +928,15 @@
             });
             if (result.error) return;
 
+            // Offer the delete/resubmit option any time an existing submission is
+            // found — not just right after a failed resubmit — so revisiting Step 2
+            // after already running allocation (e.g. to fix a DC eligibility
+            // conflict) always has a way back in.
+            if (result.already_submitted) {
+                $("#btnSubmitCostModel").disabled = true;
+                $("#btnDeleteVendorCostModel").style.display = "inline-flex";
+            }
+
             // Pie chart: count by type
             const unitLabels = ["THD SKU", "Sister SKU"];
             const colors = ["#f96302", "#003865"];
