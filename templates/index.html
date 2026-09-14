@@ -313,6 +313,13 @@
                     <!-- Factory distribution table (imports only) -->
                     <div id="factoryDistribution" style="display:none;margin-top:12px">
                         <h5 style="margin-bottom:6px;font-size:.82rem;color:var(--hd-dark-gray)">Factory Distribution</h5>
+                        <p style="margin:0 0 6px;font-size:.7rem;color:#888">
+                            Bar height is <span id="factoryDistChartMetricLabel">Containers</span>; the number above each bar is its distinct THD Key count.
+                        </p>
+                        <div id="factoryDistChartWrap" class="chart-scroll" style="overflow-x:auto;margin-bottom:10px">
+                            <svg id="factoryDistChart" style="display:block"></svg>
+                        </div>
+                        <div id="factoryDistTooltip" class="chart-tooltip" role="status" style="display:none"></div>
                         <div class="table-container" style="max-height:200px;overflow-y:auto">
                             <table class="detail-table" style="font-size:.8rem">
                                 <thead><tr><th>Factory ID</th><th style="text-align:right">SKUs<br><span style="font-weight:normal;font-size:.65rem;color:#888">distinct THD Keys</span></th><th style="text-align:right">Optimal Buy Units</th><th style="text-align:right">Containers</th></tr></thead>
@@ -443,7 +450,7 @@
 
                     <!-- Manual Selection (1 to 13) -->
                     <div id="dcManual" style="display:none;margin-top:12px">
-                        <label style="margin-bottom:8px;display:block">Select DC Count(s) <span style="font-weight:normal;color:#888;font-size:0.8rem">(1 to 13)</span></label>
+                        <label style="margin-bottom:8px;display:block;font-size:.72rem;font-weight:400;text-transform:none;letter-spacing:normal;color:var(--hd-medium-gray)">Select DC Count(s) <span style="color:#888">(1 to 13)</span></label>
                         <div class="dc-toggle-grid" id="dcToggleGrid"></div>
                         <div id="dcSelectionCountBadge" style="margin-top:10px"></div>
                     </div>
@@ -466,6 +473,15 @@
                             widest count that keeps containers at least 80% full while staying within 2% of that factory's
                             cheapest option. Each factory may land on a different DC count and assortment ID.
                         </div>
+                        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;font-size:.85rem;font-weight:600;text-transform:none;letter-spacing:normal;color:var(--hd-dark-gray)">
+                            <input type="checkbox" id="singleDcGroupToggle">
+                            Use one DC count for the entire group instead
+                        </label>
+                        <div id="singleDcGroupHint" style="margin-top:6px;font-size:.8rem;color:var(--hd-medium-gray)">
+                            Every factory shares the same DC count and assortment ID — picked automatically as the
+                            Best-Expense option with the lowest total expense across the whole group.
+                        </div>
+                        <div id="singleDcGroupResult" style="display:none;margin-top:10px"></div>
                     </div>
                 </div>
 
@@ -499,16 +515,8 @@
                         </div>
                     </div>
                     <div id="dcFilterSelection" style="display:none;margin-top:12px">
-                        <div style="display:flex;gap:24px;flex-wrap:wrap">
-                            <div style="flex:1;min-width:250px">
-                                <label style="margin-bottom:8px;display:block;font-weight:600;color:var(--hd-green)"><i class="fas fa-plus-circle"></i> Include</label>
-                                <div class="dc-filter-list" id="dcIncludeList"></div>
-                            </div>
-                            <div style="flex:1;min-width:250px">
-                                <label style="margin-bottom:8px;display:block;font-weight:600;color:var(--hd-red, #c00)"><i class="fas fa-minus-circle"></i> Exclude</label>
-                                <div class="dc-filter-list" id="dcExcludeList"></div>
-                            </div>
-                        </div>
+                        <label style="margin-bottom:8px;display:block;font-size:.72rem;font-weight:400;text-transform:none;letter-spacing:normal;color:var(--hd-medium-gray)">Click to include → exclude → clear:</label>
+                        <div class="dc-filter-list" id="dcFilterList"></div>
                         <div id="dcFilterNotice" style="display:none;margin-top:10px;padding:10px 14px;border-radius:6px;background:#d4edda;border:1px solid #28a745;font-size:0.85rem"></div>
                     </div>
                 </div>

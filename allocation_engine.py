@@ -1,11 +1,13 @@
 """Allocation procedure calls and results retrieval."""
+from __future__ import annotations
 
 import logging
 import time
 from google.cloud import bigquery
 from config import (UNIFIED_ALLOCATION_PROC, DFC_COST_MODEL_SUBMISSION,
                     CATALOG_RUN_ANALYTICS, SKU_DC_ELIGIBILITY,
-                    FINAL_ALLOCATIONS, CATALOG_RUN_ALT, EVENTS_SKU_LIST)
+                    FINAL_ALLOCATIONS, CATALOG_RUN_ALT, CATALOG_RUN_GROUP,
+                    EVENTS_SKU_LIST)
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +215,86 @@ def fetch_available_dc_counts(client: bigquery.Client, run_id: str, sku_grp: str
         rows = list(client.query(query, job_config=job_config).result())
         options = [{"dc_count": row["DC_COUNT"], "camp_asmt_id": row["CAMP_ASMT_ID"]} for row in rows]
         return {"success": True, "options": options}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def fetch_lowest_expense_dc_count(client: bigquery.Client, run_id: str, sku_grp: str,
+                                   dc_counts: list[int] | None = None,
+                                   dc_inclusions: list[int] | None = None) -> dict:
+    """Auto-select a single DC count/assortment for the whole SKU group: the
+    Best-Expense-flagged option (SC_OPTIMAL starting with 'Y') with the lowest
+    TOTAL_EXP in OBC_V_CTLG_RUN_BY_GROUP, restricted to dc_counts when given.
+    Backs the "single DC count for the whole group" toggle — an alternative to
+    the per-factory cascading tiers determine_multi_dc_assortment computes,
+    for events that want one coordinated DC count instead.
+
+    dc_inclusions: optional list of DC numbers the user has specifically asked
+    for (Step 2's DC Filter). OBC_V_CTLG_RUN_BY_GROUP only carries CAMP_LIST as
+    a "-"-joined string of DC *names* (not numbers, and not always identical to
+    this app's own DC_NAMES spelling — e.g. "Columbus Bulk" vs "Columbus"), so
+    matching DC numbers against it directly would be unreliable. Instead this
+    joins to OBC_V_CTLG_RUN_BY_SKU_ANALYTICS, which carries the same CAMP_ASMT_ID
+    alongside its own DC_LIST as a "-"-joined string of the real DC numbers —
+    filtering there is a superset match (every requested DC must appear in the
+    candidate's DC_LIST; the candidate may include additional DCs up to
+    dc_count), not an exact-match requirement."""
+    dc_count_filter = "AND g.DC_COUNT IN UNNEST(@dc_counts)" if dc_counts else ""
+    params = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("sku_grp", "STRING", sku_grp),
+    ]
+    if dc_counts:
+        params.append(bigquery.ArrayQueryParameter("dc_counts", "INT64", [int(d) for d in dc_counts]))
+
+    if dc_inclusions:
+        params.append(bigquery.ArrayQueryParameter("dc_inclusions", "STRING", [str(int(d)) for d in dc_inclusions]))
+        query = f"""
+            WITH candidate_dcs AS (
+                SELECT DISTINCT CAMP_ASMT_ID, DC_LIST
+                FROM {CATALOG_RUN_ANALYTICS}
+                WHERE RUN_ID = @run_id AND SKU_GRP = @sku_grp
+            )
+            SELECT g.DC_COUNT, g.CAMP_ASMT_ID, g.CAMP_LIST, g.TOTAL_EXP, c.DC_LIST
+            FROM {CATALOG_RUN_GROUP} g
+            JOIN candidate_dcs c ON c.CAMP_ASMT_ID = g.CAMP_ASMT_ID
+            WHERE g.RUN_ID = @run_id
+              AND g.SKU_GRP = @sku_grp
+              AND STARTS_WITH(g.SC_OPTIMAL, 'Y')
+              {dc_count_filter}
+              AND (
+                SELECT COUNT(*) FROM UNNEST(@dc_inclusions) AS dc
+                WHERE dc IN UNNEST(SPLIT(c.DC_LIST, '-'))
+              ) = ARRAY_LENGTH(@dc_inclusions)
+            ORDER BY g.TOTAL_EXP ASC
+            LIMIT 1
+        """
+    else:
+        query = f"""
+            SELECT g.DC_COUNT, g.CAMP_ASMT_ID, g.CAMP_LIST, g.TOTAL_EXP, CAST(NULL AS STRING) AS DC_LIST
+            FROM {CATALOG_RUN_GROUP} g
+            WHERE g.RUN_ID = @run_id
+              AND g.SKU_GRP = @sku_grp
+              AND STARTS_WITH(g.SC_OPTIMAL, 'Y')
+              {dc_count_filter}
+            ORDER BY g.TOTAL_EXP ASC
+            LIMIT 1
+        """
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    try:
+        rows = list(client.query(query, job_config=job_config).result())
+        if not rows:
+            reason = " matching the requested DC(s)" if dc_inclusions else ""
+            return {"success": False, "error": f"No Best-Expense option found for this run/SKU group{reason}"}
+        r = rows[0]
+        return {
+            "success": True,
+            "dc_count": r["DC_COUNT"],
+            "camp_asmt_id": r["CAMP_ASMT_ID"],
+            "camp_list": r["CAMP_LIST"],
+            "total_exp": r["TOTAL_EXP"],
+            "dc_list": sorted(int(d) for d in r["DC_LIST"].split("-")) if r["DC_LIST"] else None,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 

@@ -26,7 +26,7 @@ from config import (
 )
 from validators import validate_upload, _determine_thd_key
 from assortment_engine import determine_assortment_ids, start_multi_dc, fetch_multi_dc_results
-from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_factory_summary, is_import_run, check_vendor_dc_eligibility
+from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_lowest_expense_dc_count, fetch_factory_summary, is_import_run, check_vendor_dc_eligibility
 from event_history import fetch_prior_year_strategy, fetch_known_event_names
 
 app = Flask(__name__)
@@ -229,6 +229,65 @@ def api_prior_year_strategy():
 
 # ── Section 2: File Upload & Validation ─────────────────────────────
 
+def _compute_factory_cubes(df: pd.DataFrame) -> dict:
+    """Real per-FACTORY_ID cube (item cube * BP-rounded BUY_UNITS, summed),
+    computed straight from SCHN_SKU_ATTR — shared by the initial upload
+    validation and the later BigQuery validation step so Containers in the
+    Factory Distribution card is accurate immediately, not only after the
+    user separately runs "Validate against BigQuery". Keyed off THD_SKU_NBR,
+    falling back to SISTER_SKU_NBR for a net-new SKU whose THD_SKU_NBR is
+    null (or isn't in SCHN_SKU_ATTR) — the same fallback the SKU-age check
+    uses, so a net-new row still contributes real cube instead of silently
+    counting as 0.
+    """
+    if "FACTORY_ID" not in df.columns:
+        return {}
+
+    all_skus = set()
+    if "THD_SKU_NBR" in df.columns:
+        all_skus.update(int(x) for x in pd.to_numeric(df["THD_SKU_NBR"], errors="coerce").dropna())
+    if "SISTER_SKU_NBR" in df.columns:
+        all_skus.update(int(x) for x in pd.to_numeric(df["SISTER_SKU_NBR"], errors="coerce").dropna())
+    all_skus.discard(0)
+    if not all_skus:
+        return {}
+
+    cube_query = f"""
+        SELECT CAST(SKU_NBR AS INT64) AS SKU_NBR,
+               ROUND(ECH_DPTH * ECH_WDTH * ECH_HGHT, 2) AS ITEM_CUBE
+        FROM {SCHN_SKU_ATTR}
+        WHERE SKU_NBR IN UNNEST(@sku_list) AND LATEST_SKU_CRT_DT_FLG = TRUE
+    """
+    jc = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ArrayQueryParameter("sku_list", "INT64", sorted(all_skus)),
+    ])
+    cube_map = {
+        int(r["SKU_NBR"]): float(r["ITEM_CUBE"]) if pd.notna(r["ITEM_CUBE"]) else 0.0
+        for _, r in bq().query(cube_query, job_config=jc).to_dataframe().iterrows()
+    }
+    if not cube_map:
+        return {}
+
+    fc_totals = {}
+    for _, row in df.iterrows():
+        factory_id = row.get("FACTORY_ID")
+        if pd.isna(factory_id):
+            continue
+        thd = int(float(row["THD_SKU_NBR"])) if pd.notna(row.get("THD_SKU_NBR")) else None
+        sis = int(float(row["SISTER_SKU_NBR"])) if pd.notna(row.get("SISTER_SKU_NBR")) else None
+        sku_key = thd if thd in cube_map else (sis if sis in cube_map else thd)
+        item_cube = cube_map.get(sku_key, 0.0)
+
+        buy = int(float(row["BUY_UNITS"])) if pd.notna(row.get("BUY_UNITS")) else 0
+        bp = int(float(row["BP"])) if pd.notna(row.get("BP")) else 0
+        optimal = buy if bp <= 0 or buy % bp == 0 else math.ceil(buy / bp) * bp
+
+        fid = int(float(factory_id))
+        fc_totals[fid] = fc_totals.get(fid, 0.0) + item_cube * optimal
+
+    return {fid: round(cube, 2) for fid, cube in fc_totals.items()}
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload_file():
     if "file" not in request.files:
@@ -294,31 +353,19 @@ def upload_file():
         _upload_cache["wave_count"] = len(wave_cols)
         result["summary"]["wave_count"] = len(wave_cols)
 
-        # Pre-populate factory cubes from existing BQ data
+        # Compute real factory cube from SCHN_SKU_ATTR right away, so
+        # Containers in the Factory Distribution card is accurate on the
+        # initial upload — not only after the separate "Validate against
+        # BigQuery" step.
         if includes_imports and result["summary"].get("factory_distribution"):
-            event_name = result["summary"].get("event_name", "")
-            event_year = _upload_cache.get("event_year")
-            if event_name and event_year is not None:
-                try:
-                    fc_query = f"""
-                        SELECT FACTORY_ID, MAX(FACTORY_CUBE) AS FACTORY_CUBE
-                        FROM {EVENTS_SKU_LIST}
-                        WHERE UPPER(EVENT_NAME) = @ev AND EVENT_YEAR = @yr
-                          AND FACTORY_ID IS NOT NULL
-                        GROUP BY FACTORY_ID
-                    """
-                    fc_cfg = bigquery.QueryJobConfig(query_parameters=[
-                        bigquery.ScalarQueryParameter("ev", "STRING", event_name.upper()),
-                        bigquery.ScalarQueryParameter("yr", "INT64", event_year),
-                    ])
-                    fc_map = {int(r.FACTORY_ID): float(r.FACTORY_CUBE or 0)
-                              for r in bq().query(fc_query, job_config=fc_cfg).result()}
-                    if fc_map:
-                        for f in result["summary"]["factory_distribution"]:
-                            f["factory_cube"] = fc_map.get(f["factory_id"], 0)
-                        _upload_cache["factory_cubes"] = fc_map
-                except Exception:
-                    logger.exception("Pre-populate factory cubes failed")
+            try:
+                fc_map = _compute_factory_cubes(df)
+                if fc_map:
+                    for f in result["summary"]["factory_distribution"]:
+                        f["factory_cube"] = fc_map.get(f["factory_id"], 0)
+                    _upload_cache["factory_cubes"] = fc_map
+            except Exception:
+                logger.exception("Factory cube computation failed")
 
     # Detect mismatch: user chose domestic but file has FACTORY_ID
     if not includes_imports and "FACTORY_ID" in df.columns:
@@ -404,6 +451,28 @@ def download_validated_upload():
 
 def _sanitize_table_name(s):
     return re.sub(r'[^A-Za-z0-9_]', '_', s.strip().upper())
+
+
+def _ensure_insert_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """SUPPLIER and MVNDR_NBR are optional in the upload template now, but
+    _build_insert_query's enrichment INSERT references both by name
+    unconditionally — so guarantee they exist on the copy that actually gets
+    staged to BigQuery. Filled with '' rather than None: every other column
+    in this dataframe was read as dtype=str (see pd.read_excel/read_csv,
+    dtype=str, in upload_file), and the enrichment INSERT already treats a
+    blank SUPPLIER/MVNDR_NBR as NULL (NULLIF(...,'') / SAFE_CAST), so this
+    matches both the existing dtype and the existing blank-handling instead
+    of risking an all-None object column inferring to an unexpected BigQuery
+    load type. Returns a copy only when a column is actually missing, so the
+    cached upload df (which Step 2's vendor matching / THD_KEY derivation
+    need to see exactly as uploaded, present or absent) is never mutated."""
+    missing = [c for c in ("SUPPLIER", "MVNDR_NBR") if c not in df.columns]
+    if not missing:
+        return df
+    df = df.copy()
+    for c in missing:
+        df[c] = ""
+    return df
 
 
 @app.route("/api/validate_bq", methods=["POST"])
@@ -538,34 +607,16 @@ def validate_bq():
         jc = bigquery.LoadJobConfig(
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
         )
-        bq().load_table_from_dataframe(df, table_id, job_config=jc).result()
+        bq().load_table_from_dataframe(_ensure_insert_columns(df), table_id, job_config=jc).result()
         _upload_cache["validation_table"] = table_id
 
-        # Compute factory cube via SCHN_SKU_ATTR (only for imports with FACTORY_ID)
+        # Factory cube (only for imports with FACTORY_ID) — same SISTER_SKU_NBR-
+        # aware computation used at upload time in _compute_factory_cubes, so a
+        # re-run here can't disagree with (or regress) what the upload step
+        # already showed.
         includes_imports = _upload_cache.get("includes_imports", False)
         if includes_imports and "FACTORY_ID" in df.columns:
-            cube_query = f"""
-                WITH src AS (
-                  SELECT SAFE_CAST(THD_SKU_NBR AS INT64) AS THD_SKU_NBR,
-                         SAFE_CAST(FACTORY_ID AS INT64) AS FACTORY_ID,
-                         SAFE_CAST(BUY_UNITS AS INT64) AS BUY_UNITS,
-                         SAFE_CAST(BP AS INT64) AS BP
-                  FROM `{table_id}`
-                ),
-                attr AS (
-                  SELECT SKU_NBR, ROUND(ECH_DPTH * ECH_WDTH * ECH_HGHT, 2) AS ITEM_CUBE
-                  FROM {SCHN_SKU_ATTR} WHERE LATEST_SKU_CRT_DT_FLG IS TRUE
-                )
-                SELECT CAST(s.FACTORY_ID AS INT64) AS FACTORY_ID,
-                       ROUND(SUM(a.ITEM_CUBE * CAST(
-                         CASE WHEN MOD(s.BUY_UNITS, s.BP) = 0 THEN s.BUY_UNITS
-                              ELSE CEIL(s.BUY_UNITS / s.BP) * s.BP END AS INT64)), 2) AS FACTORY_CUBE
-                FROM src s LEFT JOIN attr a ON s.THD_SKU_NBR = a.SKU_NBR
-                WHERE s.FACTORY_ID IS NOT NULL
-                GROUP BY s.FACTORY_ID
-            """
-            cube_df = bq().query(cube_query).to_dataframe()
-            factory_cubes = {int(r["FACTORY_ID"]): float(r["FACTORY_CUBE"]) if pd.notna(r["FACTORY_CUBE"]) else 0.0 for _, r in cube_df.iterrows()}
+            factory_cubes = _compute_factory_cubes(df)
             _upload_cache["factory_cubes"] = factory_cubes
 
         checks.append({
@@ -983,7 +1034,7 @@ def insert_to_bq():
             jc = bigquery.LoadJobConfig(
                 write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
             )
-            bq().load_table_from_dataframe(df, table_id, job_config=jc).result()
+            bq().load_table_from_dataframe(_ensure_insert_columns(df), table_id, job_config=jc).result()
             validation_table = table_id
             _upload_cache["validation_table"] = table_id
         except Exception as e:
@@ -1070,7 +1121,11 @@ def api_match_vendor_strategy():
         return jsonify({"error": "No uploaded data available. Please upload a file first."}), 400
 
     if not suppliers:
-        return jsonify({"error": "No suppliers found."}), 400
+        return jsonify({
+            "error": "No SUPPLIER data found in this upload. SUPPLIER is required to use the "
+                     "Vendor-Aligned strategy — add a SUPPLIER column (with values) to your file, "
+                     "or use DC Selection instead.",
+        }), 400
 
     try:
         vs_query = f"SELECT VENDOR, ASMT_ID, DC_COUNT, DC_LIST, DC_NM_LIST FROM {VENDOR_STRATEGY}"
@@ -1622,6 +1677,32 @@ def _update_events_target_dc(client, event_name, event_year, vendor_matches):
     return job.num_dml_affected_rows or 0
 
 
+def _update_events_campus_pairs(client, event_name, event_year, campus_pairs):
+    """Writes this DC Selection submission's "Treat Bulk Counterparts The
+    Same" choice onto every EVENTS_SKU_LIST row for the event, event-wide
+    rather than per-record — unlike TARGET_DC_COUNT/TARGET_DC_INCLUSIONS,
+    campus merging isn't a per-SKU/per-vendor decision. This is what lets
+    event_history.py's self-healing STRATEGY_TYPE-style correction later
+    carry the choice into EVENTS_SKU_DFC_ALLOCATIONS's own
+    PERRIS_CAMPUS_MERGED/LG_CAMPUS_MERGED columns once this
+    event shows up there as prior-year history."""
+    update_sql = f"""
+        UPDATE {EVENTS_SKU_LIST}
+        SET PERRIS_CAMPUS_MERGED = @perris_merged,
+            LG_CAMPUS_MERGED = @lg_merged
+        WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+    """
+    update_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("perris_merged", "BOOL", "perris" in campus_pairs),
+        bigquery.ScalarQueryParameter("lg_merged", "BOOL", "locust_grove" in campus_pairs),
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ])
+    job = client.query(update_sql, job_config=update_config)
+    job.result()
+    return job.num_dml_affected_rows or 0
+
+
 @app.route("/api/download_vendor_aligned_table", methods=["POST"])
 def download_vendor_aligned_table():
     """Export every SKU record across all matched suppliers with its
@@ -1728,7 +1809,20 @@ def api_submit_cost_model():
     body = request.get_json(silent=True) or {}
     event_name = body.get("event_name", "")
     vendor_matches = body.get("vendor_matches") or []
-    logger.info(f"submit_cost_model: event_name={event_name!r} vendor_matches_count={len(vendor_matches)}")
+    # DC Selection (Single-DC/Multi-DC Count) has no per-vendor DC resolution
+    # the way vendor_matches does — these are simply the event-wide Include/
+    # Exclude choices from Step 2's DC filter, applied identically to every
+    # SKU row. target_dc_count is left null for this strategy for now.
+    dc_inclusions = body.get("dc_inclusions") or []
+    dc_exclusions = body.get("dc_exclusions") or []
+    # DC Selection's "Treat Bulk Counterparts The Same" choice — only
+    # meaningful for that strategy (vendor-aligned resolves DCs per vendor
+    # instead), so only acted on in the vendor_matches-less branch below.
+    campus_pairs = body.get("campus_pairs") or []
+    logger.info(
+        f"submit_cost_model: event_name={event_name!r} vendor_matches_count={len(vendor_matches)} "
+        f"dc_inclusions={dc_inclusions} dc_exclusions={dc_exclusions}"
+    )
     if not event_name:
         return jsonify({"error": "event_name is required"}), 400
 
@@ -1802,6 +1896,12 @@ def api_submit_cost_model():
                 bigquery.ArrayQueryParameter("rows", "STRUCT", struct_rows),
             ])
         else:
+            # DC Selection: no per-SKU DC resolution to draw on, so every row
+            # gets the same event-wide dc_inclusions/dc_exclusions the user set
+            # in Step 2's DC filter (None if they left it unset — same as the
+            # prior always-null behavior).
+            dc_inclusions_str = ", ".join(str(d) for d in dc_inclusions) if dc_inclusions else None
+            dc_exclusions_str = ", ".join(str(d) for d in dc_exclusions) if dc_exclusions else None
             submission_sql = f"""
                 INSERT INTO {DFC_COST_MODEL_SUBMISSION}
                   (date_added, `key`, project_name, bucket, sku_nbr, buy_qty,
@@ -1815,8 +1915,8 @@ def api_submit_cost_model():
                   CAST(SUM(BUY_UNITS) AS STRING) AS buy_qty,
                   @email AS email,
                   CAST(NULL AS STRING) AS target_dc_count,
-                  CAST(NULL AS STRING) AS dc_inclusions,
-                  CAST(NULL AS STRING) AS dc_exclusions
+                  @dc_inclusions AS dc_inclusions,
+                  @dc_exclusions AS dc_exclusions
                 FROM {EVENTS_SKU_LIST}
                 WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
                 GROUP BY SKU_NBR
@@ -1824,6 +1924,8 @@ def api_submit_cost_model():
             sub_config = bigquery.QueryJobConfig(query_parameters=base_params + [
                 bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
                 bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+                bigquery.ScalarQueryParameter("dc_inclusions", "STRING", dc_inclusions_str),
+                bigquery.ScalarQueryParameter("dc_exclusions", "STRING", dc_exclusions_str),
             ])
 
         job = bq().query(submission_sql, job_config=sub_config)
@@ -1840,6 +1942,13 @@ def api_submit_cost_model():
             # unambiguously instead of re-deriving it from the submission table.
             updated = _update_events_target_dc(bq(), event_name, event_year, vendor_matches)
             logger.info(f"Updated TARGET_DC_COUNT/TARGET_DC_INCLUSIONS on {updated} EVENTS_SKU_LIST rows")
+        else:
+            # DC Selection has no per-vendor DC resolution, but it does have
+            # its own event-wide campus merge choice — record it the same way,
+            # onto EVENTS_SKU_LIST rather than DFC_COST_MODEL_SUBMISSION (which
+            # this app can't get a new column added to).
+            updated = _update_events_campus_pairs(bq(), event_name, event_year, campus_pairs)
+            logger.info(f"Updated PERRIS_CAMPUS_MERGED/LG_CAMPUS_MERGED on {updated} EVENTS_SKU_LIST rows")
 
         return jsonify({"success": True, "message": f"Submitted {rows_inserted} SKUs to DFC Cost Model.", "row_count": rows_inserted})
     except Exception as e:
@@ -2187,6 +2296,23 @@ def api_available_dc_counts():
     if not run_id or not sku_grp:
         return jsonify({"error": "run_id and sku_grp are required"}), 400
     result = fetch_available_dc_counts(bq(), run_id, sku_grp)
+    if not result.get("success"):
+        return jsonify(result), 500
+    return jsonify(result)
+
+
+@app.route("/api/lowest_expense_dc_count", methods=["POST"])
+def api_lowest_expense_dc_count():
+    body = request.get_json(silent=True)
+    if not body:
+        return jsonify({"error": "Invalid JSON body"}), 400
+    run_id = body.get("run_id", "")
+    sku_grp = body.get("sku_grp", "")
+    dc_counts = body.get("dc_counts") or None
+    dc_inclusions = body.get("dc_inclusions") or None
+    if not run_id or not sku_grp:
+        return jsonify({"error": "run_id and sku_grp are required"}), 400
+    result = fetch_lowest_expense_dc_count(bq(), run_id, sku_grp, dc_counts, dc_inclusions)
     if not result.get("success"):
         return jsonify(result), 500
     return jsonify(result)

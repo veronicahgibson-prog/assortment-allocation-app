@@ -124,15 +124,30 @@ code {
   margin-bottom: 6px; color: var(--hd-dark-gray); font-size: .82rem; font-weight: 700;
 }
 .prior-strategy-detail-row {
-  display: grid; grid-template-columns: minmax(180px, 2fr) 90px minmax(130px, 1fr);
+  display: grid; grid-template-columns: minmax(130px, 1fr) minmax(180px, 2fr) 90px;
   gap: 12px; align-items: center; padding: 7px 0;
   border-top: 1px solid #f0e4dc; font-size: .78rem;
 }
 .prior-strategy-detail-row-vendor {
-  grid-template-columns: minmax(180px, 2fr) 90px minmax(130px, 1fr) 110px;
+  grid-template-columns: minmax(130px, 1fr) minmax(180px, 2fr) 90px 110px;
 }
 .prior-strategy-detail-row span { color: var(--hd-medium-gray); }
 .prior-strategy-detail-row small { color: var(--hd-dark-gray); }
+
+table.prior-strategy-dc-table {
+  width: 100%; border-collapse: collapse; font-size: .82rem; table-layout: fixed;
+}
+.prior-strategy-dc-table th {
+  background: var(--hd-orange); color: #fff; text-align: center;
+  font-size: .74rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+  padding: 9px 10px; border: 1px solid var(--hd-orange);
+}
+.prior-strategy-dc-table td {
+  text-align: center; padding: 8px 10px; border: 1px solid #f0e4dc;
+  color: var(--hd-dark-gray); font-variant-numeric: tabular-nums;
+}
+.prior-strategy-dc-table td:first-child { font-weight: 700; text-align: left; }
+.prior-strategy-dc-table tbody tr:nth-child(even) { background: #fbf7f4; }
 
 /* ── Wizard Stepper ───────────────────────────────────────────── */
 .stepper-section {
@@ -307,8 +322,8 @@ code {
 }
 .dc-toggle-btn:hover { border-color: var(--hd-orange); }
 .dc-toggle-btn.active {
-  border-color: var(--hd-orange-light);
-  background: var(--hd-orange-light);
+  border-color: var(--hd-orange);
+  background: var(--hd-orange);
   color: #fff;
 }
 
@@ -349,6 +364,14 @@ code {
 }
 .vendor-row-actions {
   display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+}
+/* Pins the actions column to a fixed width so its empty header cell's dark
+   background reaches exactly as far right as the "View SKUs"/"..." buttons
+   below it — without this, the column's auto width comes from whichever
+   row's buttons happen to need the least space, leaving the header (and
+   narrower rows) looking like they don't line up with a wider row's buttons. */
+.vendor-dc-table th:last-child, .vendor-dc-table td:last-child {
+  width: 170px;
 }
 .vendor-row-moved td {
   color: var(--hd-medium-gray); font-style: italic; background: #fafafa;
@@ -401,6 +424,14 @@ code {
 .vendor-dc-btn {
   width: 48px; height: 36px; font-size: .82rem;
 }
+.vendor-add-dc-select, .vendor-sku-add-dc-select {
+  height: 36px; border: 1px dashed var(--hd-medium-gray); border-radius: 4px;
+  background: #fff; color: var(--hd-medium-gray); font-size: .78rem;
+  padding: 0 6px; cursor: pointer;
+}
+.vendor-add-dc-select:hover, .vendor-sku-add-dc-select:hover {
+  border-color: var(--hd-orange); color: var(--hd-orange);
+}
 .vendor-dc-total {
   margin-top: 8px; font-weight: 600;
 }
@@ -434,6 +465,9 @@ code {
 .vendor-sku-table .vendor-dc-btn {
   width: 32px; height: 26px; font-size: .68rem;
 }
+.vendor-sku-table .vendor-sku-add-dc-select {
+  height: 26px; font-size: .68rem; padding: 0 4px;
+}
 .vendor-sku-table th:last-child, .vendor-sku-table td:last-child {
   width: 34px; text-align: right;
 }
@@ -459,22 +493,23 @@ code {
   background: #fff8f2;
 }
 
+/* Same pill grid as the vendor-aligned strategy's DC NBR buttons
+   (.vendor-dc-buttons/.vendor-dc-btn) — .dc-filter-toggle-btn layers onto
+   the shared .dc-toggle-btn base so both look like the same control, just
+   with a third state (exclude) added on top of plain active/inactive. */
 .dc-filter-list {
-  display: flex; flex-direction: column; gap: 6px;
+  display: flex; flex-wrap: wrap; gap: 7px;
 }
-.dc-filter-list label {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; border-radius: var(--radius);
-  cursor: pointer; font-size: 0.85rem;
-  border: 1px solid var(--hd-light-gray);
-  transition: var(--transition);
+.dc-filter-toggle-btn {
+  width: 48px; height: 36px; font-size: .82rem;
 }
-.dc-filter-list label:hover { background: #f5f5f5; }
-.dc-filter-list label input { margin: 0; }
-.dc-filter-list label.dc-filter-disabled {
-  opacity: 0.45; cursor: not-allowed; background: #f5f5f5;
+.dc-filter-toggle-btn[data-state="include"] {
+  border-color: #28a745; background: #28a745; color: #fff;
 }
-.dc-filter-list label.dc-filter-disabled:hover { background: #f5f5f5; }
+.dc-filter-toggle-btn[data-state="exclude"] {
+  border-color: #dc3545; background: #dc3545; color: #fff;
+  text-decoration: line-through;
+}
 
 /* ── Form Elements ────────────────────────────────────────────── */
 .form-row {
@@ -613,3 +648,43 @@ code {
   .prior-strategy-metrics { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
   .prior-strategy-detail-row, .prior-strategy-detail-row-vendor { grid-template-columns: 1fr; gap: 2px; }
 }
+
+/* ── Factory Distribution bar chart ──────────────────────────────── */
+.chart-scroll { -webkit-overflow-scrolling: touch; }
+.chart-bar { fill: var(--hd-blue); cursor: pointer; }
+.chart-bar:hover, .chart-bar:focus, .chart-bar.is-active {
+  fill: var(--hd-orange);
+  outline: none;
+}
+.chart-bar-count-label {
+  font-size: 9px;
+  fill: var(--hd-medium-gray);
+  font-variant-numeric: tabular-nums;
+  text-anchor: middle;
+}
+.chart-axis-tick-label {
+  font-size: 9px;
+  fill: #888;
+}
+.chart-y-tick-label {
+  font-size: 9px;
+  fill: #888;
+  text-anchor: end;
+}
+.chart-grid-line { stroke: #e6e6e6; stroke-width: 1; shape-rendering: crispEdges; }
+.chart-baseline { stroke: var(--hd-light-gray); stroke-width: 1; shape-rendering: crispEdges; }
+.chart-tooltip {
+  position: fixed;
+  z-index: 500;
+  background: var(--hd-black);
+  color: #fff;
+  font-size: .72rem;
+  line-height: 1.5;
+  padding: 6px 10px;
+  border-radius: 6px;
+  box-shadow: var(--shadow-md);
+  pointer-events: none;
+  max-width: 220px;
+  white-space: nowrap;
+}
+.chart-tooltip strong { font-variant-numeric: tabular-nums; }

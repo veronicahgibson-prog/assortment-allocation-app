@@ -14,6 +14,7 @@
     let userEmail = "";
     let includesImports = false;
     let multiDcDynamicSelected = false;
+    let singleDcGroupChoice = null; // {dc_count, camp_asmt_id, camp_list, total_exp} once auto-picked
     let waveCount = 0;
     let selectedStrategy = "";
     // Whether the current upload's rows are already written to
@@ -87,6 +88,9 @@
     // ── Formatters ─────────────────────────────────────────────────
     function fmtNum(v) {
         return v == null ? "—" : Number(v).toLocaleString("en-US");
+    }
+    function toTitleCase(s) {
+        return (s || "").toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
     }
     function fmtPct(v) {
         if (v == null) return "—";
@@ -317,6 +321,26 @@
     // greying Step 2's DC options) is a separate, not-yet-built step.
     const fmtCube = v => v != null ? Number(v).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2}) : "—";
 
+    // "47.9K" style — only for the by-DFC breakdown table below, where a full
+    // comma-formatted number per row would be noisier than useful; fmtCube/
+    // fmtNum stay full-precision everywhere else.
+    function fmtCompact(v) {
+        if (v == null) return "—";
+        const n = Number(v);
+        return Math.abs(n) >= 1000 ? (n / 1000).toFixed(1) + "K" : n.toLocaleString("en-US");
+    }
+
+    // Same "MAIN" suffix convention app.py's _dc_display_name uses for the
+    // main side of a campus pair (see CAMPUS_PAIRS in config.py) — ALL_DCS
+    // itself just says "Perris"/"Locust Grove" for those, which reads as
+    // ambiguous next to their own "Perris Bulk"/"Locust Grove Bulk" rows in
+    // the same table.
+    const _CAMPUS_MAIN_SUFFIX_DCS = new Set([6007, 6777]);
+    function dfcDisplayName(dcNbr) {
+        const base = ALL_DCS.find(d => d.nbr === dcNbr)?.name || `DC ${dcNbr}`;
+        return _CAMPUS_MAIN_SUFFIX_DCS.has(dcNbr) ? `${base} MAIN` : base;
+    }
+
     async function setupPriorYearStrategy() {
         const select = $("#step1EventNameSelect");
         const customInput = $("#step1EventNameCustom");
@@ -391,21 +415,83 @@
             if (!section) return result;
             section.style.display = "block";
             if (!result.found) {
-                section.innerHTML = `<p style="margin:0;color:#666;font-size:.85rem">
-                    <i class="fas fa-circle-info"></i> ${name} has no history.</p>`;
+                const checkedTypeLabel = result.checked_type
+                    ? result.checked_type.charAt(0).toUpperCase() + result.checked_type.slice(1)
+                    : "";
+                const checkedLabel = result.checked_year
+                    ? `${result.checked_year} ${toTitleCase(name)}${checkedTypeLabel ? " " + checkedTypeLabel : ""}`
+                    : toTitleCase(name);
+                const fallbackLabel = result.fallback_available
+                    ? (result.fallback_is_import === "true" ? "Import" : "Domestic")
+                    : "";
+                // A single self-contained warning — no other content in this
+                // section alongside it. When there's nothing to fall back to,
+                // it's just the notice; when there is, Yes/No replace the old
+                // plain-text link so the choice reads as a real decision, in
+                // the same orange/gray (primary/secondary) THD button colors
+                // used everywhere else in this app.
+                section.innerHTML = `
+                    <div style="padding:14px 16px;background:#fff3cd;border:1px solid #ffc107;border-radius:8px">
+                        <i class="fas fa-exclamation-triangle" style="color:#856404;margin-right:6px"></i>
+                        <strong style="color:#856404">${checkedLabel} has no history.</strong>
+                        ${fallbackLabel ? `
+                        <p style="margin:8px 0 10px;color:#856404;font-size:.85rem">Did you mean <strong>${fallbackLabel}</strong>?</p>
+                        <div style="display:flex;gap:8px">
+                            <button type="button" class="btn btn-primary" id="priorStrategyFallbackYes" style="font-size:.8rem;padding:6px 16px">Yes</button>
+                            <button type="button" class="btn btn-secondary" id="priorStrategyFallbackNo" style="font-size:.8rem;padding:6px 16px">No</button>
+                        </div>` : ""}
+                    </div>`;
+                if (fallbackLabel) {
+                    $("#priorStrategyFallbackYes")?.addEventListener("click", async () => {
+                        // Keep the Event Type toggle in sync with the results we're
+                        // about to show — dispatching "change" (not just setting
+                        // .checked) lets the existing document-level listener re-run
+                        // syncImportToggle(), which also updates the container-size
+                        // panel and template text for the new type.
+                        const radio = document.querySelector(`input[name="importToggle"][value="${result.fallback_is_import}"]`);
+                        if (radio) {
+                            radio.checked = true;
+                            radio.dispatchEvent(new Event("change", { bubbles: true }));
+                        }
+                        showLoading("Checking for a prior year's strategy…");
+                        try {
+                            await performPriorYearCheck(name, year, result.fallback_is_import);
+                        } finally {
+                            hideLoading();
+                        }
+                    });
+                    $("#priorStrategyFallbackNo")?.addEventListener("click", () => {
+                        section.style.display = "none";
+                    });
+                }
                 return result;
             }
             const o = result.overall;
             const isVendorAligned = (o.strategy_type || "").toUpperCase() === "VENDOR-ALIGNED";
-            const strategyLabel = isVendorAligned ? "Vendor-Aligned Strategy" : (o.strategy_type || "Strategy Not Recorded");
-            const countLabel = isVendorAligned ? "Suppliers" : "Assortments";
+            const STRATEGY_TYPE_LABELS = { "SINGLE-DC COUNT": "Single-DC Count Strategy", "MULTI-DC COUNT": "Multi-DC Count Strategy" };
+            const strategyLabel = isVendorAligned
+                ? "Vendor-Aligned Strategy"
+                : (STRATEGY_TYPE_LABELS[(o.strategy_type || "").toUpperCase()] || o.strategy_type || "Strategy Not Recorded");
+            const countLabel = isVendorAligned ? "Suppliers" : "DC Counts";
             // Vendor-aligned rows can list more than one vendor per row (rows
             // sharing an identical DC list are merged) so the supplier count
             // is the number of vendor names across all rows, not the row count.
-            const countValue = isVendorAligned
-                ? (result.strategy_summary || []).reduce((sum, s) => sum + (s.vendor ? s.vendor.split(", ").length : 0), 0)
-                : (result.strategy_summary?.length || 0);
-            const eventTypeLabel = isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "";
+            // For a non-vendor-aligned strategy, "DC Counts" is the distinct
+            // set of per-THD-key DC counts (how many DCs each individual
+            // SKU/factory record was assigned to) — not a single overall
+            // total, since different keys can use different DC counts.
+            const dcCountsByKey = o.dc_counts_by_key || [];
+            const countValueDisplay = isVendorAligned
+                ? fmtNum((result.strategy_summary || []).reduce((sum, s) => sum + (s.vendor ? s.vendor.split(", ").length : 0), 0))
+                : (dcCountsByKey.length ? dcCountsByKey.join(", ") : "—");
+            // Only label Domestic/Import when the backend actually applied
+            // that filter for this event/year (result.is_import_known) —
+            // otherwise IS_IMPORT was never populated on these rows (e.g.
+            // Halfway Halloween, backfilled before that column existed), so
+            // the toggle position on screen is just whatever was last
+            // selected, not a fact about this event. Showing "DOMESTIC" next
+            // to the year would claim a distinction the data doesn't make.
+            const eventTypeLabel = !result.is_import_known ? "" : (isImportVal === "true" ? "IMPORT" : isImportVal === "false" ? "DOMESTIC" : "");
             let html = `<div class="prior-strategy-card">
                 <div class="prior-strategy-heading">
                     <div><span class="prior-strategy-kicker">${strategyLabel}</span>
@@ -413,21 +499,40 @@
                     <span class="prior-strategy-type">${eventTypeLabel || "—"}</span>
                 </div>
                 <div class="prior-strategy-metrics">
-                    <div><span>${countLabel}</span><strong>${fmtNum(countValue)}</strong></div>
+                    <div><span>${countLabel}</span><strong>${countValueDisplay}</strong></div>
                     <div><span>Total Units</span><strong>${fmtNum(o.total_units)}</strong></div>
                     <div><span>Total Cube (ft&sup3;)</span><strong>${fmtCube(o.total_cube)}</strong></div>
-                    <div><span>Total THD Keys</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
+                    <div><span>Total SKUs</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
                     <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
                 </div>`;
             if (result.strategy_summary?.length) {
                 html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
-                for (const s of result.strategy_summary) {
+                // Highest DC count first, then (within the same DC count)
+                // whichever row covers the most SKUs — e.g. among several
+                // 9-DC rows, the one with 600 SKUs outranks one with 4.
+                const sortedSummary = [...result.strategy_summary].sort((a, b) =>
+                    (b.dc_count ?? 0) - (a.dc_count ?? 0) || (b.thd_key_count ?? 0) - (a.thd_key_count ?? 0));
+                for (const s of sortedSummary) {
                     const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
                     const rowClass = isVendorAligned ? " prior-strategy-detail-row-vendor" : "";
-                    const thdKeysCell = isVendorAligned ? `<span>${fmtNum(s.thd_key_count)} THD Keys</span>` : "";
-                    html += `<div class="prior-strategy-detail-row${rowClass}"><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><strong>${label}</strong>${thdKeysCell}</div>`;
+                    const thdKeysCell = isVendorAligned ? `<span>${fmtNum(s.thd_key_count)} SKUs</span>` : "";
+                    html += `<div class="prior-strategy-detail-row${rowClass}"><strong>${label}</strong><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span>${thdKeysCell}</div>`;
                 }
                 html += `</div>`;
+            }
+            if (result.by_dc?.length) {
+                // by_dc is raw (unfolded) — Perris Bulk/Main and Locust Grove
+                // Bulk/Main show as separate rows even for a merged campus,
+                // since this is meant to show exactly which physical
+                // buildings units/cube actually landed in. Placed last, after
+                // the vendor/assortment DC details above. Already sorted by
+                // units descending from the backend.
+                html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">By DFC — Units &amp; Cube</div>
+                    <table class="prior-strategy-dc-table"><thead><tr><th>DFC</th><th>Units</th><th>Cube</th></tr></thead><tbody>`;
+                for (const d of result.by_dc) {
+                    html += `<tr><td>${dfcDisplayName(d.dc_nbr).toUpperCase()}</td><td>${fmtCompact(d.units)}</td><td>${fmtCompact(d.cube)}</td></tr>`;
+                }
+                html += `</tbody></table></div>`;
             }
             html += `</div>`;
             section.innerHTML = html;
@@ -526,6 +631,7 @@
         // no longer reflects what's on screen — the next insert must be real,
         // not skipped as "already done."
         dataInserted = false;
+        dcSelectionCostModelSubmitted = false;
 
         $("#fileName").textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
 
@@ -734,6 +840,145 @@
         tfoot.style.borderTop = "2px solid #333";
         tfoot.innerHTML = `<td>Total</td><td style="text-align:right">${fmtNum(totalSkus)}</td><td style="text-align:right">${fmtNum(totalUnits)}</td><td style="text-align:right">${hasCube ? totalContainers.toFixed(2) : "—"}</td>`;
         tbody.appendChild(tfoot);
+
+        renderFactoryDistChart(sorted, hasCube, divisor);
+    }
+
+    // ── Factory distribution bar chart ──────────────────────────────
+    // Bar height is the same metric ranked in the table above (Containers once
+    // real factory cube is known, Optimal Buy Units as a fallback before that).
+    // The number above each bar is a second metric (distinct THD Keys) riding
+    // as an annotation, not a repeat of the bar's own encoded value.
+    function roundedTopRectPath(x, y, w, h, r) {
+        r = Math.max(0, Math.min(r, h, w / 2));
+        return `M${x},${y + h} L${x},${y + r} Q${x},${y} ${x + r},${y} `
+            + `L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} Z`;
+    }
+
+    function niceAxisMax(rawMax) {
+        if (!(rawMax > 0)) return 1;
+        const mag = Math.pow(10, Math.floor(Math.log10(rawMax)));
+        const norm = rawMax / mag;
+        const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+        return step * mag;
+    }
+
+    function positionChartTooltip(evt, tooltip) {
+        const pad = 14;
+        const rectW = tooltip.offsetWidth || 180;
+        const rectH = tooltip.offsetHeight || 60;
+        let left = evt.clientX + pad;
+        let top = evt.clientY + pad;
+        if (left + rectW > window.innerWidth) left = evt.clientX - rectW - pad;
+        if (top + rectH > window.innerHeight) top = evt.clientY - rectH - pad;
+        tooltip.style.left = Math.max(4, left) + "px";
+        tooltip.style.top = Math.max(4, top) + "px";
+    }
+
+    function renderFactoryDistChart(sorted, hasCube, divisor) {
+        const svg = $("#factoryDistChart");
+        const metricLabel = $("#factoryDistChartMetricLabel");
+        const tooltip = $("#factoryDistTooltip");
+        if (!svg) return;
+        if (metricLabel) metricLabel.textContent = hasCube ? "Containers" : "Optimal Buy Units";
+        svg.innerHTML = "";
+        if (!sorted || !sorted.length) {
+            svg.setAttribute("width", "0");
+            svg.setAttribute("height", "0");
+            return;
+        }
+
+        const svgNS = "http://www.w3.org/2000/svg";
+        const values = sorted.map(f => hasCube ? (f.factory_cube || 0) / divisor : (f.optimal_buy_units || 0));
+        const niceMax = niceAxisMax(Math.max(...values, 0));
+
+        const barW = 22, barGap = 10;
+        const plotLeft = 44, plotRight = 12, plotTop = 20, plotHeight = 140, plotBottom = 58;
+        const chartWidth = plotLeft + sorted.length * (barW + barGap) - barGap + plotRight;
+        const chartHeight = plotTop + plotHeight + plotBottom;
+        const baselineY = plotTop + plotHeight;
+
+        svg.setAttribute("width", chartWidth);
+        svg.setAttribute("height", chartHeight);
+        svg.setAttribute("viewBox", `0 0 ${chartWidth} ${chartHeight}`);
+
+        // Y gridlines + ticks, rounded to clean numbers
+        const tickCount = 4;
+        for (let i = 0; i <= tickCount; i++) {
+            const val = (niceMax / tickCount) * i;
+            const y = baselineY - (val / niceMax) * plotHeight;
+
+            const grid = document.createElementNS(svgNS, "line");
+            grid.setAttribute("x1", plotLeft);
+            grid.setAttribute("x2", chartWidth - plotRight);
+            grid.setAttribute("y1", y);
+            grid.setAttribute("y2", y);
+            grid.setAttribute("class", i === 0 ? "chart-baseline" : "chart-grid-line");
+            svg.appendChild(grid);
+
+            const tickLabel = document.createElementNS(svgNS, "text");
+            tickLabel.setAttribute("x", plotLeft - 6);
+            tickLabel.setAttribute("y", y + 3);
+            tickLabel.setAttribute("class", "chart-y-tick-label");
+            tickLabel.textContent = hasCube ? val.toFixed(1) : fmtNum(Math.round(val));
+            svg.appendChild(tickLabel);
+        }
+
+        sorted.forEach((f, i) => {
+            const val = values[i];
+            const barH = niceMax > 0 ? Math.max((val / niceMax) * plotHeight, val > 0 ? 1 : 0) : 0;
+            const x = plotLeft + i * (barW + barGap);
+            const y = baselineY - barH;
+
+            const bar = document.createElementNS(svgNS, "path");
+            bar.setAttribute("d", roundedTopRectPath(x, y, barW, barH, 4));
+            bar.setAttribute("class", "chart-bar");
+            bar.setAttribute("tabindex", "0");
+            bar.setAttribute("role", "img");
+            const valueText = hasCube ? `${val.toFixed(2)} containers` : `${fmtNum(Math.round(val))} optimal buy units`;
+            bar.setAttribute("aria-label", `Factory ${f.factory_id}: ${valueText}, ${f.sku_count} distinct THD keys`);
+            svg.appendChild(bar);
+
+            // Distinct THD Key count, direct-labeled above every bar (the one
+            // number this chart deliberately puts on every mark — see comment above).
+            const countLabel = document.createElementNS(svgNS, "text");
+            countLabel.setAttribute("x", x + barW / 2);
+            countLabel.setAttribute("y", Math.max(y - 6, plotTop - 6));
+            countLabel.setAttribute("class", "chart-bar-count-label");
+            countLabel.textContent = fmtNum(f.sku_count);
+            svg.appendChild(countLabel);
+
+            // Factory ID axis label, rotated to fit under a 22px-wide bar
+            const xLabel = document.createElementNS(svgNS, "text");
+            xLabel.setAttribute("class", "chart-axis-tick-label");
+            xLabel.setAttribute("text-anchor", "end");
+            xLabel.setAttribute("transform", `translate(${x + barW / 2},${baselineY + 8}) rotate(-55)`);
+            xLabel.textContent = f.factory_id;
+            svg.appendChild(xLabel);
+
+            if (tooltip) {
+                const showTip = (evt) => {
+                    bar.classList.add("is-active");
+                    tooltip.innerHTML = `<div>Factory <strong>${f.factory_id}</strong></div>`
+                        + `<div>${hasCube ? "Containers" : "Optimal Buy Units"}: <strong>${hasCube ? val.toFixed(2) : fmtNum(f.optimal_buy_units)}</strong></div>`
+                        + `<div>Distinct THD Keys: <strong>${fmtNum(f.sku_count)}</strong></div>`;
+                    tooltip.style.display = "block";
+                    if (evt.clientX != null) positionChartTooltip(evt, tooltip);
+                };
+                const hideTip = () => {
+                    bar.classList.remove("is-active");
+                    tooltip.style.display = "none";
+                };
+                bar.addEventListener("pointerenter", showTip);
+                bar.addEventListener("pointermove", showTip);
+                bar.addEventListener("pointerleave", hideTip);
+                bar.addEventListener("focus", () => {
+                    const box = bar.getBoundingClientRect();
+                    showTip({ clientX: box.right, clientY: box.top });
+                });
+                bar.addEventListener("blur", hideTip);
+            }
+        });
     }
 
     function downloadFactoryDist() {
@@ -833,11 +1078,26 @@
                     const confirmed = await confirmVendorStrategy();
                     if (!confirmed) return;
                 }
+            } else if (selectedStrategy === "DC_SELECTION") {
+                // submit_cost_model reads BUY_UNITS back out of EVENTS_SKU_LIST,
+                // so the insert has to land first.
+                if (!dataInserted) {
+                    const inserted = await doInsert(false);
+                    if (!inserted) return;
+                }
+                // No separate "Confirm DC Selection" button — submit to DFC
+                // Cost Model right here the first time, same automatic-on-Next
+                // treatment Vendor-Aligned gets above. dc_inclusions/
+                // dc_exclusions (Step 2's DC filter) ride along inside
+                // submitCostModel() itself.
+                if (!dcSelectionCostModelSubmitted) {
+                    const submitted = await submitCostModel();
+                    if (!submitted) return;
+                    dcSelectionCostModelSubmitted = true;
+                }
             } else if (!dataInserted) {
-                // Holding off on the EVENTS_SKU_LIST write for now — commented
-                // out on purpose, not deleted.
-                // const inserted = await doInsert(false);
-                // if (!inserted) return;
+                const inserted = await doInsert(false);
+                if (!inserted) return;
             }
             goStep(6);
         });
@@ -849,12 +1109,10 @@
     // Strategies" button and by Step 2's Next button when the user proceeds
     // without clicking Confirm themselves. Returns whether it succeeded.
     async function confirmVendorStrategy() {
-        // Holding off on the EVENTS_SKU_LIST write for now — commented out
-        // on purpose, not deleted.
-        // if (!dataInserted) {
-        //     const inserted = await doInsert(false);
-        //     if (!inserted) return false;
-        // }
+        if (!dataInserted) {
+            const inserted = await doInsert(false);
+            if (!inserted) return false;
+        }
         const submitted = await submitCostModel();
         if (!submitted) return false;
         vendorStrategyConfirmed = true;
@@ -1121,16 +1379,23 @@
             el.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> Assortment tool complete${runLine}.
             </div>`;
-            // Auto-populate Run ID and check DC eligibility right away for VENDOR_ALIGNED —
-            // as early as this can possibly be known (OBC_CTLG_SKU_DC/CATALOG_RUN_ANALYTICS
-            // are both keyed by RUN_ID, which doesn't exist before this run finishes) —
-            // rather than waiting for a full allocation run to surface conflicts in
-            // UNALLOCATED_RECORDS. Guarded so it only fires once per new run_id.
+            // Auto-populate Run ID as soon as it's known — regardless of strategy,
+            // since DC Selection's "Use one DC count for the entire group instead"
+            // (singleDcGroupToggle) needs Run ID/SKU Group at Step 6's "Determine
+            // Assortment IDs" just as much as anything vendor-aligned does. Only the
+            // DC-eligibility check below stays VENDOR_ALIGNED-only (see
+            // check_vendor_dc_eligibility's own docstring) — that's a check against
+            // DFC_COST_MODEL_SUBMISSION's per-vendor dc_inclusions, meaningless for
+            // DC Selection. Guarded so the eligibility check only fires once per new
+            // run_id.
+            const runIdInput = $("#stratRunId");
+            if (state.run_id && runIdInput && !runIdInput.value.trim()) {
+                runIdInput.value = state.run_id;
+                syncSkuGrpFromServer();
+            }
             const isVendorAligned = document.querySelector('input[name="strategy"][value="VENDOR_ALIGNED"]')?.checked;
             if (state.run_id && state.run_id !== autoEligibilityCheckedForRun && isVendorAligned) {
                 autoEligibilityCheckedForRun = state.run_id;
-                const runIdInput = $("#stratRunId");
-                if (runIdInput && !runIdInput.value.trim()) runIdInput.value = state.run_id;
                 loadDcEligibility();
             }
         } else if (state.status === "error") {
@@ -1188,9 +1453,22 @@
                 // vendor_matches carries Step 2's resolved DC assignments (and
                 // any per-SKU overrides) so the submission can populate
                 // target_dc_count/dc_inclusions/dc_exclusions instead of
-                // leaving them null. Empty for a non-vendor-aligned strategy,
-                // where the backend falls back to the old SKU_NBR-only insert.
-                body: JSON.stringify({ event_name: eventName, vendor_matches: vendorMatches }),
+                // leaving them null. Empty for a non-vendor-aligned strategy.
+                // For DC Selection (Single-DC/Multi-DC Count), there's no
+                // per-vendor resolution to send instead — dc_inclusions/
+                // dc_exclusions are just Step 2's event-wide DC filter
+                // choices, applied identically to every SKU row.
+                body: JSON.stringify({
+                    event_name: eventName,
+                    vendor_matches: vendorMatches,
+                    dc_inclusions: dcInclusions,
+                    dc_exclusions: dcExclusions,
+                    // DC Selection's "Treat Bulk Counterparts The Same" choice
+                    // (campusPairs: subset of ["perris","locust_grove"] that
+                    // are toggled on) — only meaningful for that strategy;
+                    // the backend ignores it for a vendor-aligned submission.
+                    campus_pairs: campusPairs,
+                }),
             });
             const result = await resp.json();
             if (!resp.ok || result.error) throw new Error(result.error || "Submission failed");
@@ -1309,6 +1587,11 @@
         }
     }
 
+    // Same green banner style as #dcFilterNotice ("Include/Exclude") — a
+    // full-width block, not the small inline-block .badge-pass pill this
+    // used before, so the two confirmations in Step 2 read consistently.
+    const _DC_COUNT_NOTICE_STYLE = "display:block;padding:10px 14px;border-radius:6px;background:#d4edda;border:1px solid #28a745;font-size:0.85rem";
+
     function updateDcSelectionCountBadge() {
         const selected = getSelectedDcCounts("#dcToggleGrid");
         const badge = $("#dcSelectionCountBadge");
@@ -1317,16 +1600,30 @@
             if (badge) badge.innerHTML = "";
             if (cascadingGroup) cascadingGroup.style.display = "none";
         } else if (selected.length === 1) {
-            if (badge) badge.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.88rem;display:inline-block;padding:6px 12px"><i class="fas fa-info-circle"></i> <strong>1 DC Count (${selected[0]}) selected</strong> — Single DC Strategy</div>`;
+            if (badge) badge.innerHTML = `<div style="${_DC_COUNT_NOTICE_STYLE}"><i class="fas fa-info-circle" style="color:#155724"></i> <strong>1 DC Count (${selected[0]}) selected</strong> — Single DC Strategy</div>`;
             if (cascadingGroup) cascadingGroup.style.display = "none";
         } else {
-            if (badge) badge.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.88rem;display:inline-block;padding:6px 12px"><i class="fas fa-info-circle"></i> <strong>${selected.length} DC Counts (${selected.join(", ")}) selected</strong> — Multi DC Strategy</div>`;
+            if (badge) badge.innerHTML = `<div style="${_DC_COUNT_NOTICE_STYLE}"><i class="fas fa-info-circle" style="color:#155724"></i> <strong>${selected.length} DC Counts (${selected.join(", ")}) selected</strong> — Multi DC Strategy</div>`;
             if (cascadingGroup) cascadingGroup.style.display = "block";
         }
     }
 
     function getSelectedDcCounts(containerId) {
         return [...$(containerId).querySelectorAll(".dc-toggle-btn.active")].map(b => parseInt(b.dataset.dcCount));
+    }
+
+    // A single DC count picked manually or via lookup caps how many DCs can be
+    // marked "include" in the DC Filter below — including more than the chosen
+    // count would ask the group-run query for something impossible (e.g. count
+    // 5 with 6 required DCs). Dynamic mode (the optimizer picks the count) has
+    // no fixed count to cap against yet, so it returns null (no cap) even when
+    // "use one DC count for the entire group" is checked.
+    function getSingleDcCountCap() {
+        if (multiDcDynamicSelected && includesImports) return null;
+        const counts = $("#dcManual")?.style.display !== "none"
+            ? getSelectedDcCounts("#dcToggleGrid")
+            : [...$$('#dcCountChecks input:checked')].map(c => parseInt(c.dataset.dcCount));
+        return counts.length === 1 ? counts[0] : null;
     }
 
     function setupStrategy() {
@@ -1365,6 +1662,7 @@
                     $("#paramsCampus").style.display = "none";
                     $("#paramsDcFilter").style.display = "none";
                     campusPairs = [];
+                    $$(".dc-filter-toggle-btn").forEach(btn => { btn.dataset.state = "none"; });
                     dcInclusions = [];
                     dcExclusions = [];
                     // No manual "Match Suppliers" button anymore — if a file's
@@ -1392,10 +1690,29 @@
         // DC Selection: know vs lookup
         $("#btnDcKnow")?.addEventListener("click", () => {
             multiDcDynamicSelected = false;
+            singleDcGroupChoice = null;
             $("#dcManual").style.display = "block";
             $("#dcLookup").style.display = "none";
             $("#dcDynamic").style.display = "none";
             updateDcSelectionCountBadge();
+        });
+
+        $("#singleDcGroupToggle")?.addEventListener("change", (e) => {
+            // Run ID / SKU Group aren't filled in yet at this point in the wizard
+            // (they're set later, at the Run Allocation step) — so this can only
+            // record intent here. The actual lookup happens in determineAssortment()
+            // at submit time, once those fields are guaranteed to be populated.
+            singleDcGroupChoice = null;
+            const resultEl = $("#singleDcGroupResult");
+            if (resultEl) {
+                resultEl.style.display = e.target.checked ? "block" : "none";
+                if (e.target.checked) {
+                    resultEl.innerHTML = `<div class="validation-badge" style="display:block">
+                        <i class="fas fa-info-circle"></i> The lowest-expense DC count will be picked automatically
+                        when you click "Determine Assortment IDs."
+                    </div>`;
+                }
+            }
         });
 
         $("#btnDcLookup")?.addEventListener("click", () => {
@@ -1457,7 +1774,11 @@
             // Deactivate both buttons
             $("#btnCampusPerris")?.classList.remove("active");
             $("#btnCampusLG")?.classList.remove("active");
-            $("#campusNotice").style.display = "none";
+            // Also clears campusPairs (both buttons are now inactive) — without
+            // this, a Yes->select->No sequence left campusPairs holding the
+            // stale selection even though the UI now shows "No", and that
+            // stale value would get submitted as this event's merge choice.
+            updateCampusNotice();
         });
         $("#btnCampusPerris")?.addEventListener("click", () => toggleCampusBtn("btnCampusPerris"));
         $("#btnCampusLG")?.addEventListener("click", () => toggleCampusBtn("btnCampusLG"));
@@ -1469,6 +1790,7 @@
         });
         $("#btnDcFilterNo")?.addEventListener("click", () => {
             $("#dcFilterSelection").style.display = "none";
+            $$(".dc-filter-toggle-btn").forEach(btn => { btn.dataset.state = "none"; });
             dcInclusions = [];
             dcExclusions = [];
             $("#dcFilterNotice").style.display = "none";
@@ -1562,19 +1884,44 @@
             return;
         }
 
+        // Domestic events (no per-factory tier_strategy) don't have one DC
+        // count for the whole event — different THD keys can be assigned to
+        // different numbers of DCs (e.g. Halloween 2026 mixed keys using
+        // anywhere from 2 to 12 DCs). Use the distinct set of per-key DC
+        // counts computed on the backend rather than
+        // overall.normalized_dc_count, which is the total distinct DCs
+        // touched across the whole event and wrongly auto-selected a single
+        // "13" for Halloween 2026 instead of highlighting the actual counts
+        // in use.
         const hasTiers = !!(pys.tier_strategy && pys.tier_strategy.length);
         const dcCounts = hasTiers
             ? [...new Set(pys.tier_strategy.map(t => t.dc_count))]
-            : [pys.overall?.normalized_dc_count || 1];
+            : (pys.overall?.dc_counts_by_key?.length ? pys.overall.dc_counts_by_key : [1]);
         const dcNbrs = hasTiers
             ? [...new Set(pys.tier_strategy.map(t => t.dc_nbr))]
             : (pys.by_dc || []).map(d => d.dc_nbr);
+        // For domestic events, prefer the actual recorded PERRIS_CAMPUS_MERGED/
+        // LOCUST_GROVE_CAMPUS_MERGED flag (set at a prior Step 2 submission,
+        // possibly self-healed from EVENTS_SKU_LIST) when it's known. NULL
+        // means "never recorded" (every event predating this flag, or one
+        // whose Step 2 submission ran before it existed) — only then fall
+        // back to *_cooccurs_evidence: whether any single key's own raw DC
+        // list actually contained both the bulk and main DC of a pair, the
+        // one scenario where merging changes anything (a key's units legitimately
+        // spilling across both buildings). The old guess — "the main DC number
+        // showed up somewhere in the event" — proved nothing on its own:
+        // confirmed on HALFWAY HALLOWEEN 2024, where Perris Bulk and Main
+        // never co-occurred within one key, only across different keys (some
+        // keys' SKUs landed in Bulk, others' in Main), yet the old guess still
+        // auto-toggled "merged" just because Main appeared somewhere.
+        const perrisMerged = pys.overall?.perris_campus_merged;
+        const lgMerged = pys.overall?.locust_grove_campus_merged;
         const perrisOn = hasTiers
             ? pys.tier_strategy.some(t => t.dc_nbr === 6007 && t.campus_pair === "Y")
-            : dcNbrs.includes(6007);
+            : (perrisMerged !== null && perrisMerged !== undefined ? perrisMerged : !!pys.overall?.perris_cooccurs_evidence);
         const lgOn = hasTiers
             ? pys.tier_strategy.some(t => t.dc_nbr === 6777 && t.campus_pair === "Y")
-            : dcNbrs.includes(6777);
+            : (lgMerged !== null && lgMerged !== undefined ? lgMerged : !!pys.overall?.locust_grove_cooccurs_evidence);
         const isSingle = dcCounts.length === 1 && dcCounts[0] === 1;
         const strategyVal = isSingle ? "SINGLE_DC" : "MULTI_DC";
 
@@ -1601,7 +1948,9 @@
 
         if ($("#dcFilterSelection")?.style.display === "none") $("#btnDcFilterYes")?.click();
         buildDcFilterLists();
-        $$(".dc-incl-cb").forEach(cb => { cb.checked = dcNbrs.includes(parseInt(cb.dataset.dc)); });
+        $$(".dc-filter-toggle-btn").forEach(btn => {
+            btn.dataset.state = dcNbrs.includes(parseInt(btn.dataset.dc)) ? "include" : "none";
+        });
         updateDcFilters();
 
         if (note) {
@@ -1615,6 +1964,11 @@
     }
 
     let vendorStrategyConfirmed = false;
+    // Mirrors vendorStrategyConfirmed for DC Selection (Single-DC/Multi-DC
+    // Count), which has no separate "Confirm" button of its own — Step 2's
+    // Next submits to DFC Cost Model automatically the first time, same as
+    // Vendor-Aligned falls back to doing when its Confirm click was skipped.
+    let dcSelectionCostModelSubmitted = false;
     let vendorMatches = [];
     let campusPairs = [];
 
@@ -1649,7 +2003,8 @@
         }
     }
 
-    // DC filter variables
+    // DC filter variables — each DC is its own toggle, cycling none -> include
+    // -> exclude -> none, so a DC can never end up in both lists at once.
     let dcInclusions = [];
     let dcExclusions = [];
 
@@ -1697,7 +2052,6 @@
         5857: { fill: "#764e3a", step: 5 },
         5860: { fill: "#54524c", step: 9 },
         5882: { fill: "#655144", step: 7 },
-        5938: { fill: "#954720", step: 1 },
         6006: { fill: "#192841", step: 17 },
         6007: { fill: "#45484a", step: 11 },
         6705: { fill: "#6e503f", step: 6 },
@@ -1708,33 +2062,39 @@
     const DC_COLOR_FALLBACK = "#8a8a86"; // mid-gray placeholder for a DC added this session, before the ramp is re-optimized to include it
     function dcFill(dcNbr) { return (DC_COLOR[dcNbr] || {}).fill || DC_COLOR_FALLBACK; }
 
+    const DC_FILTER_NEXT_STATE = { none: "include", include: "exclude", exclude: "none" };
+
     function buildDcFilterLists() {
-        const inclContainer = $("#dcIncludeList");
-        const exclContainer = $("#dcExcludeList");
-        if (inclContainer.children.length > 0) return; // already built
+        const container = $("#dcFilterList");
+        if (container.children.length > 0) return; // already built
         for (const dc of ALL_DCS) {
-            inclContainer.innerHTML += `<label><input type="checkbox" data-dc="${dc.nbr}" class="dc-incl-cb" /> ${dc.nbr} — ${dc.name}</label>`;
-            exclContainer.innerHTML += `<label><input type="checkbox" data-dc="${dc.nbr}" class="dc-excl-cb" /> ${dc.nbr} — ${dc.name}</label>`;
+            container.innerHTML += `<button type="button" class="dc-toggle-btn dc-filter-toggle-btn" data-dc="${dc.nbr}" data-state="none" `
+                + `title="${dc.name.toUpperCase()}">${dc.nbr}</button>`;
         }
-        inclContainer.addEventListener("change", updateDcFilters);
-        exclContainer.addEventListener("change", updateDcFilters);
+        container.addEventListener("click", (e) => {
+            const btn = e.target.closest(".dc-filter-toggle-btn");
+            if (!btn) return;
+            const nextState = DC_FILTER_NEXT_STATE[btn.dataset.state];
+            if (nextState === "include") {
+                const cap = getSingleDcCountCap();
+                if (cap != null && dcInclusions.length >= cap) {
+                    toast(`Only ${cap} DC(s) can be included — that's the selected DC count`, "error");
+                    return;
+                }
+            }
+            btn.dataset.state = nextState;
+            updateDcFilters();
+        });
     }
 
     function updateDcFilters() {
-        dcInclusions = [...$$(".dc-incl-cb:checked")].map(cb => parseInt(cb.dataset.dc));
-        dcExclusions = [...$$(".dc-excl-cb:checked")].map(cb => parseInt(cb.dataset.dc));
-
-        // A DC can't be both included and excluded — grey out (disable) each box's
-        // counterpart on the other side once it's checked, so it can't be selected there.
-        $$(".dc-incl-cb").forEach(cb => {
-            const dc = parseInt(cb.dataset.dc);
-            cb.closest("label").classList.toggle("dc-filter-disabled", dcExclusions.includes(dc));
-            cb.disabled = dcExclusions.includes(dc);
-        });
-        $$(".dc-excl-cb").forEach(cb => {
-            const dc = parseInt(cb.dataset.dc);
-            cb.closest("label").classList.toggle("dc-filter-disabled", dcInclusions.includes(dc));
-            cb.disabled = dcInclusions.includes(dc);
+        dcInclusions = [];
+        dcExclusions = [];
+        $$(".dc-filter-toggle-btn").forEach(btn => {
+            const dc = parseInt(btn.dataset.dc);
+            const state = btn.dataset.state;
+            if (state === "include") dcInclusions.push(dc);
+            else if (state === "exclude") dcExclusions.push(dc);
         });
 
         const notice = $("#dcFilterNotice");
@@ -1875,10 +2235,24 @@
         return String(value || "").replace(/^\[|\]$/g, "").split("-").map(value => value.replace(/^['\"]|['\"]$/g, "").trim()).filter(Boolean);
     }
 
-    function vendorDcName(dcNbr, names, index) {
-        if (names[index]) return names[index];
+    function dcNetworkName(dcNbr) {
         const known = ALL_DCS.find(dc => dc.nbr === dcNbr);
         return known ? known.name : `DC ${dcNbr}`;
+    }
+
+    function vendorDcName(dcNbr, names, index) {
+        if (names[index]) return names[index];
+        return dcNetworkName(dcNbr);
+    }
+
+    // Union of a row's default/override DC set with whatever's currently
+    // selected — lets a DC added at the SKU level (beyond the vendor's own
+    // default list) still get a pill rendered for it, without disturbing the
+    // positional alignment `eligibleDcs`/`names` normally rely on: any DC
+    // beyond `defaultDcs`'s own entries falls back to dcNetworkName() in
+    // vendorDcName() above instead of a (mis-)indexed name lookup.
+    function unionDcs(defaultDcs, selectedDcs) {
+        return [...new Set([...defaultDcs, ...selectedDcs])];
     }
 
     // Renders every DC in the network as a button, not just the ones eligible
@@ -1899,6 +2273,18 @@
         }).join("");
     }
 
+    // A small "+ Add DC" dropdown listing every network DC not already in
+    // `currentDcs`, appended next to a row's pills — the only way to bring a
+    // DC into a vendor's (or one SKU's) list that wasn't already part of it,
+    // since renderDcButtonGrid only ever draws buttons for `eligibleDcs`.
+    function renderAddDcOptions(currentDcs, dataAttrs, selectClass) {
+        const available = ALL_DCS.filter(dc => !currentDcs.includes(dc.nbr)).sort((a, b) => a.nbr - b.nbr);
+        if (!available.length) return "";
+        const options = available.map(dc => `<option value="${dc.nbr}">${dc.nbr} — ${dc.name}</option>`).join("");
+        return `<select class="${selectClass}" title="Add a DC to this list"${dataAttrs}>
+            <option value="">+ Add DC</option>${options}</select>`;
+    }
+
     function toggleVendorDc(matchIndex, dcNbr) {
         const match = vendorMatches[matchIndex];
         const selected = parseVendorDcs(match?.DC_LIST);
@@ -1906,12 +2292,28 @@
             toast("Each supplier must have at least one DC selected", "error");
             return;
         }
-        const next = selected.includes(dcNbr)
+        const isDeselecting = selected.includes(dcNbr);
+        const next = isDeselecting
             ? selected.filter(dc => dc !== dcNbr)
             : [...selected, dcNbr];
         next.sort((a, b) => a - b);
         match.DC_LIST = next.join(", ");
         match.DC_COUNT = next.length;
+
+        // A DC the user brought in via "+ Add DC" (not part of the original
+        // VENDOR_ALIGNED_STRATEGY match) has no reason to linger as a
+        // greyed-out pill once deselected — drop it from the eligible set
+        // entirely so it disappears, instead of just turning inactive the
+        // way an originally-matched DC does.
+        const addedDcs = new Set(parseVendorDcs(match._addedDcs));
+        if (isDeselecting && addedDcs.has(dcNbr)) {
+            addedDcs.delete(dcNbr);
+            match._addedDcs = [...addedDcs].join(", ");
+            const removeIndex = parseVendorDcs(match._initialDcList).indexOf(dcNbr);
+            match._initialDcList = parseVendorDcs(match._initialDcList).filter(dc => dc !== dcNbr).join(", ");
+            match._initialDcNames = parseVendorNames(match._initialDcNames).filter((_, i) => i !== removeIndex).join(", ");
+        }
+
         const initialDcs = parseVendorDcs(match._initialDcList);
         const initialNames = parseVendorNames(match._initialDcNames);
         match.DC_NM_LIST = next.map(dc => vendorDcName(dc, initialNames, initialDcs.indexOf(dc))).join(", ");
@@ -1926,6 +2328,47 @@
                 v.DC_NM_LIST = match.DC_NM_LIST;
             }
         });
+        renderVendorSupplierSummary(vendorMatches);
+    }
+
+    // Brings a DC that wasn't part of this vendor's VENDOR_ALIGNED_STRATEGY
+    // match into its selectable (and immediately selected) set — appended to
+    // `_initialDcList`/`_initialDcNames` so it keeps rendering as a pill on
+    // every future re-render, not just this one. Cascades to any vendor
+    // merged into this one the same way toggleVendorDc does.
+    function addVendorDc(matchIndex, dcNbr) {
+        const match = vendorMatches[matchIndex];
+        if (!match || !Number.isFinite(dcNbr)) return;
+        const initialDcs = parseVendorDcs(match._initialDcList);
+        const initialNames = parseVendorNames(match._initialDcNames);
+        if (!initialDcs.includes(dcNbr)) {
+            initialDcs.push(dcNbr);
+            initialNames.push(dcNetworkName(dcNbr));
+            match._initialDcList = initialDcs.join(", ");
+            match._initialDcNames = initialNames.join(", ");
+        }
+        // Remembered so a later deselect (toggleVendorDc) can drop this DC
+        // from the eligible set entirely instead of leaving it as an
+        // inactive pill — only a DC that was already part of the vendor's
+        // real VENDOR_ALIGNED_STRATEGY match gets to keep that greyed-out
+        // placeholder behavior.
+        const addedDcs = new Set(parseVendorDcs(match._addedDcs));
+        addedDcs.add(dcNbr);
+        match._addedDcs = [...addedDcs].join(", ");
+        const selected = parseVendorDcs(match.DC_LIST);
+        if (!selected.includes(dcNbr)) selected.push(dcNbr);
+        selected.sort((a, b) => a - b);
+        match.DC_LIST = selected.join(", ");
+        match.DC_COUNT = selected.length;
+        match.DC_NM_LIST = selected.map(dc => vendorDcName(dc, initialNames, initialDcs.indexOf(dc))).join(", ");
+        vendorMatches.forEach(v => {
+            if (v._movedTo === matchIndex) {
+                v.DC_LIST = match.DC_LIST;
+                v.DC_COUNT = match.DC_COUNT;
+                v.DC_NM_LIST = match.DC_NM_LIST;
+            }
+        });
+        toast(`Added DC ${dcNbr} to ${(match.VENDOR || match.SUPPLIER || "").toUpperCase()}`, "success");
         renderVendorSupplierSummary(vendorMatches);
     }
 
@@ -2013,12 +2456,14 @@
                 // actually selectable/selected for it.
                 const defaultDcs = parseVendorDcs(owner.match.DC_LIST);
                 const selectedDcs = vendorSkuDcs(owner.match, row);
+                const eligibleDcs = unionDcs(defaultDcs, selectedDcs);
                 const extraCells = extraKeyCols.map(f => `<td>${row[f] || "—"}</td>`).join("");
                 html += `<tr data-sku-key="${row.THD_KEY}"><td><div class="vendor-dc-buttons">
-                    ${renderDcButtonGrid(matchIndex, defaultDcs, parseVendorNames(owner.match._initialDcNames), selectedDcs, {
+                    ${renderDcButtonGrid(matchIndex, eligibleDcs, parseVendorNames(owner.match._initialDcNames), selectedDcs, {
                         extraClass: " vendor-sku-dc-btn",
                         dataAttrs: ` data-sku-key="${row.THD_KEY}" data-owner-index="${owner.index}"`,
                     })}
+                    ${renderAddDcOptions(eligibleDcs, ` data-match-index="${matchIndex}" data-owner-index="${owner.index}" data-sku-key="${row.THD_KEY}"`, "vendor-sku-add-dc-select")}
                     </div>${owner.match.SKU_OVERRIDES[row.THD_KEY] ? '<span class="vendor-sku-override">Override</span>' : ""}</td>
                     <td class="vendor-sku-count">${selectedDcs.length}</td>
                     <td>${(owner.match.VENDOR || owner.match.SUPPLIER || "").toUpperCase()}</td>
@@ -2037,6 +2482,12 @@
                 button.addEventListener("click", () => toggleVendorSkuDc(
                     Number(button.dataset.matchIndex), Number(button.dataset.ownerIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
                 ));
+            });
+            container.querySelectorAll(".vendor-sku-add-dc-select").forEach(select => {
+                select.addEventListener("change", () => {
+                    const dc = Number(select.value);
+                    if (dc) addVendorSkuDc(Number(select.dataset.matchIndex), Number(select.dataset.ownerIndex), select.dataset.skuKey, dc);
+                });
             });
             container.querySelectorAll(".vendor-sku-move-btn").forEach(button => {
                 button.addEventListener("click", e => {
@@ -2149,17 +2600,24 @@
         const defaultDcs = parseVendorDcs(owner.DC_LIST);
         const names = parseVendorNames(owner._initialDcNames);
         const selectedDcs = parseVendorDcs(owner.SKU_OVERRIDES[skuKey] || owner.DC_LIST);
+        const eligibleDcs = unionDcs(defaultDcs, selectedDcs);
 
         const btnCell = row.querySelector(".vendor-dc-buttons");
         if (btnCell) {
-            btnCell.innerHTML = renderDcButtonGrid(groupIndex, defaultDcs, names, selectedDcs, {
+            btnCell.innerHTML = renderDcButtonGrid(groupIndex, eligibleDcs, names, selectedDcs, {
                 extraClass: " vendor-sku-dc-btn",
                 dataAttrs: ` data-sku-key="${skuKey}" data-owner-index="${ownerIndex}"`,
-            });
+            }) + renderAddDcOptions(eligibleDcs, ` data-match-index="${groupIndex}" data-owner-index="${ownerIndex}" data-sku-key="${skuKey}"`, "vendor-sku-add-dc-select");
             btnCell.querySelectorAll(".vendor-sku-dc-btn").forEach(button => {
                 button.addEventListener("click", () => toggleVendorSkuDc(
                     Number(button.dataset.matchIndex), Number(button.dataset.ownerIndex), button.dataset.skuKey, Number(button.dataset.dcNbr)
                 ));
+            });
+            btnCell.querySelectorAll(".vendor-sku-add-dc-select").forEach(select => {
+                select.addEventListener("change", () => {
+                    const dc = Number(select.value);
+                    if (dc) addVendorSkuDc(Number(select.dataset.matchIndex), Number(select.dataset.ownerIndex), select.dataset.skuKey, dc);
+                });
             });
         }
 
@@ -2199,6 +2657,23 @@
         }
         const next = selected.includes(dcNbr) ? selected.filter(dc => dc !== dcNbr) : [...selected, dcNbr];
         next.sort((a, b) => a - b);
+        const defaults = parseVendorDcs(owner.DC_LIST);
+        if (next.join(",") === defaults.join(",")) delete owner.SKU_OVERRIDES[skuKey];
+        else owner.SKU_OVERRIDES[skuKey] = next;
+        rerenderVendorSkuRow(groupIndex, ownerIndex, skuKey);
+    }
+
+    // Adds a DC to one SKU's own override, independent of its vendor's
+    // supplier-level DC_LIST — the SKU-level counterpart to addVendorDc.
+    // Only creates/touches SKU_OVERRIDES for this one THD_KEY; the vendor's
+    // default list (and every other SKU under it) is untouched.
+    function addVendorSkuDc(groupIndex, ownerIndex, skuKey, dcNbr) {
+        const owner = vendorMatches[ownerIndex];
+        if (!owner || !Number.isFinite(dcNbr)) return;
+        owner.SKU_OVERRIDES = owner.SKU_OVERRIDES || {};
+        const current = parseVendorDcs(owner.SKU_OVERRIDES[skuKey] || owner.DC_LIST);
+        if (current.includes(dcNbr)) return;
+        const next = [...current, dcNbr].sort((a, b) => a - b);
         const defaults = parseVendorDcs(owner.DC_LIST);
         if (next.join(",") === defaults.join(",")) delete owner.SKU_OVERRIDES[skuKey];
         else owner.SKU_OVERRIDES[skuKey] = next;
@@ -2286,7 +2761,7 @@
         });
 
         html += `<div class="table-container vendor-dc-table-wrap"><table class="detail-table vendor-dc-table">
-            <thead><tr><th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>Matched THD Key</th><th></th></tr></thead><tbody>`;
+            <thead><tr><th>DC NBR List</th><th>DC Count</th><th>Supplier</th><th>SKUs</th><th></th></tr></thead><tbody>`;
         matches.forEach((m, matchIndex) => {
             const isOther = (m.VENDOR || "").toUpperCase() === "OTHER";
             const isNew = newSuppliers.has(norm(m.VENDOR || m.SUPPLIER));
@@ -2340,6 +2815,7 @@
 
             html += `<tr${isNew ? ' class="vendor-supplier-new"' : ""}><td><div class="vendor-dc-buttons">
                 ${renderDcButtonGrid(matchIndex, initialDcs, names, selectedDcs)}
+                ${renderAddDcOptions(initialDcs, ` data-match-index="${matchIndex}"`, "vendor-add-dc-select")}
                 </div></td><td class="vendor-dc-count"${minDcCount !== maxDcCount ? ` title="One or more SKUs in this group have a per-SKU DC override"` : ""}>${dcCountLabel}</td>
                 <td><strong>${isNew ? '<i class="fas fa-plus vendor-new-icon" title="Not in a comparable last-year row"></i> ' : ""}${matchedVendor}</strong>${isOther
                     ? ' <span title="No vendor-specific strategy matched — using the OTHER default" style="color:#b8860b"><i class="fas fa-circle-info"></i></span>'
@@ -2360,6 +2836,12 @@
             button.addEventListener("click", () => toggleVendorDc(
                 Number(button.dataset.matchIndex), Number(button.dataset.dcNbr)
             ));
+        });
+        box.querySelectorAll(".vendor-add-dc-select").forEach(select => {
+            select.addEventListener("change", () => {
+                const dc = Number(select.value);
+                if (dc) addVendorDc(Number(select.dataset.matchIndex), dc);
+            });
         });
         box.querySelectorAll(".vendor-sku-toggle").forEach(button => {
             button.addEventListener("click", () => toggleVendorSkuRows(Number(button.dataset.matchIndex)));
@@ -2580,26 +3062,84 @@
             body.vendor_matches = vendorMatches;
         } else if (selectedStrategy === "DC_SELECTION" || selectedStrategy === "SINGLE_DC" || selectedStrategy === "MULTI_DC") {
             const dynamicMode = multiDcDynamicSelected && includesImports;
+            const singleDcGroupWanted = dynamicMode && !!$("#singleDcGroupToggle")?.checked;
 
-            if (dynamicMode) {
-                body.strategy = "MULTI_DC";
-                body.dc_counts = [];
-            } else if ($("#dcManual")?.style.display !== "none") {
-                const dcCounts = getSelectedDcCounts("#dcToggleGrid");
+            // Manual/lookup DC counts, computed up front (dynamic mode has none
+            // yet — that's the whole point of "determine the optimal DC count(s)
+            // for me"). Whether this ends up length 1 decides, below, whether the
+            // group-run query runs for THIS path too, same as the dynamic toggle.
+            let dcCounts = null;
+            if (!dynamicMode) {
+                dcCounts = $("#dcManual")?.style.display !== "none"
+                    ? getSelectedDcCounts("#dcToggleGrid")
+                    : [...$$('#dcCountChecks input:checked')].map(c => parseInt(c.dataset.dcCount));
                 if (!dcCounts.length) {
                     toast("Select at least one DC count", "error");
                     return;
                 }
-                body.strategy = dcCounts.length === 1 ? "SINGLE_DC" : "MULTI_DC";
-                body.dc_counts = dcCounts;
-            } else {
-                const checkboxSelected = [...$$('#dcCountChecks input:checked')].map(c => parseInt(c.dataset.dcCount));
-                if (!checkboxSelected.length) {
-                    toast("Select at least one DC count", "error");
+            }
+
+            // A single DC count — however it was arrived at (manually checking
+            // just one box, checking just one lookup option, or the dynamic
+            // "use one DC count for the entire group" toggle) — always resolves
+            // through the same group-run query (fetch_lowest_expense_dc_count /
+            // OBC_V_CTLG_RUN_BY_GROUP): the Best-Expense, lowest-TOTAL_EXP
+            // assortment for the whole group, optionally constrained to specific
+            // DC numbers the user has marked "include" in the DC Filter below.
+            const singleCountWanted = singleDcGroupWanted || (dcCounts && dcCounts.length === 1);
+
+            if (singleCountWanted) {
+                const runId = $("#stratRunId")?.value?.trim() || "";
+                const skuGrp = $("#stratSkuGrp")?.value?.trim() || "";
+                if (!runId || !skuGrp) {
+                    toast("Run ID and SKU Group are required to pick a single DC count", "error");
                     return;
                 }
-                body.strategy = checkboxSelected.length === 1 ? "SINGLE_DC" : "MULTI_DC";
-                body.dc_counts = checkboxSelected;
+                const resultEl = $("#singleDcGroupResult");
+                if (resultEl) {
+                    resultEl.style.display = "block";
+                    resultEl.innerHTML = `<div class="validation-badge" style="display:block"><i class="fas fa-spinner fa-spin"></i> Finding the lowest-expense DC count for this group…</div>`;
+                }
+                try {
+                    const result = await api("/api/lowest_expense_dc_count", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            run_id: runId, sku_grp: skuGrp,
+                            dc_counts: dcCounts && dcCounts.length ? dcCounts : undefined,
+                            dc_inclusions: dcInclusions && dcInclusions.length ? dcInclusions : undefined,
+                        }),
+                    });
+                    if (result.error) throw new Error(result.error);
+                    singleDcGroupChoice = result;
+                    if (resultEl) {
+                        const dcListLine = result.dc_list ? ` (DCs ${result.dc_list.join(", ")})` : "";
+                        resultEl.innerHTML = `<div class="validation-badge badge-pass" style="display:block">
+                            <i class="fas fa-check-circle"></i> Selected <strong>${result.dc_count} DCs</strong>${dcListLine}
+                            (assortment ID ${result.camp_asmt_id}) — lowest total expense at
+                            <strong>$${Number(result.total_exp).toLocaleString()}</strong> for the whole group.
+                        </div>`;
+                    }
+                } catch (err) {
+                    toast("Could not determine lowest-expense DC count: " + err.message, "error");
+                    if (resultEl) resultEl.style.display = "none";
+                    return;
+                }
+                body.strategy = "SINGLE_DC";
+                body.camp_asmt_id = singleDcGroupChoice.camp_asmt_id;
+                body.dc_count_run_id = runId;
+                body.dc_count_sku_grp = skuGrp;
+                body.run_id = runId;
+                body.sku_grp = skuGrp;
+                body.is_import = includesImports;
+                _executeAssortment(body);
+                return;
+            } else if (dynamicMode) {
+                body.strategy = "MULTI_DC";
+                body.dc_counts = [];
+            } else {
+                body.strategy = "MULTI_DC";
+                body.dc_counts = dcCounts;
             }
             body.min_containers = 5;
             body.is_import = includesImports;

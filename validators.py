@@ -54,6 +54,43 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
             errors.append({"row": "—", "column": m, "error": "Required column missing from file"})
         return {"passed": False, "checks": checks, "errors": errors, "summary": {}}
 
+    # 1b. Fill blank MVNDR_NBR with a proxy value distinct from every other
+    # MVNDR_NBR (real or proxy) in the file. This lets a row with no known
+    # vendor number still pass validation and still contribute a distinct
+    # THD_SKU_NBR + MVNDR_NBR combination to the THD_KEY (check 6 below),
+    # rather than forcing _determine_thd_key to fall back to SUPPLIER/
+    # SKU_DESC/etc. to tell rows apart.
+    mvndr_warnings = []
+    if "MVNDR_NBR" in df.columns:
+        used = set()
+        for v in df["MVNDR_NBR"]:
+            if pd.notna(v) and str(v).strip() != "":
+                try:
+                    used.add(int(float(str(v).strip())))
+                except (ValueError, TypeError):
+                    pass
+        next_proxy = 10000
+        for idx, val in df["MVNDR_NBR"].items():
+            if pd.isna(val) or str(val).strip() == "":
+                while next_proxy in used:
+                    next_proxy += 10000
+                used.add(next_proxy)
+                df.at[idx, "MVNDR_NBR"] = str(next_proxy)
+                mvndr_warnings.append({
+                    "row": int(idx) + 2, "column": "MVNDR_NBR",
+                    "row_data": {c: str(df.at[idx, c]) if pd.notna(df.at[idx, c]) else "" for c in df.columns},
+                    "message": f"MVNDR_NBR was blank — filled with proxy value {next_proxy}",
+                })
+                next_proxy += 10000
+    checks.append({
+        "id": "1b",
+        "name": "MVNDR_NBR proxy-filled where blank",
+        "passed": True,
+        "detail": f"{len(mvndr_warnings)} row(s) filled with a proxy MVNDR_NBR" if mvndr_warnings else "No blank MVNDR_NBR values",
+        "warning": len(mvndr_warnings) > 0,
+        "details": mvndr_warnings,
+    })
+
     # 2. No null required values
     null_errors = []
     for col in not_null_cols:
@@ -66,6 +103,22 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
                     "row_data": {c: str(df.at[idx, c]) if pd.notna(df.at[idx, c]) else "" for c in df.columns},
                     "error": f"{col} cannot be null",
                 })
+    # THD_SKU_NBR may be null only if SISTER_SKU_NBR is populated (a net-new
+    # SKU keyed off its sister), and vice versa — whichever one is populated
+    # still has to clear the >= 365 days history check in validate_bq. Both
+    # being null leaves no identifier at all, which is always an error.
+    has_sister_col = "SISTER_SKU_NBR" in df.columns
+    for idx, row in df.iterrows():
+        thd_blank = pd.isna(row.get("THD_SKU_NBR")) or str(row.get("THD_SKU_NBR")).strip() == ""
+        sis_blank = (not has_sister_col) or pd.isna(row.get("SISTER_SKU_NBR")) or str(row.get("SISTER_SKU_NBR")).strip() == ""
+        if thd_blank and sis_blank:
+            null_errors.append({
+                "row": int(idx) + 2,
+                "column": "THD_SKU_NBR",
+                "row_data": {c: str(df.at[idx, c]) if pd.notna(df.at[idx, c]) else "" for c in df.columns},
+                "error": "THD_SKU_NBR and SISTER_SKU_NBR cannot both be null",
+            })
+
     null_details = [{"row": e["row"], "column": e["column"], "message": e["error"], "row_data": e.get("row_data", {})} for e in null_errors]
     checks.append({
         "id": 2,
@@ -391,4 +444,4 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
                 for _, r in dist.iterrows()
             ]
 
-    return {"passed": passed, "checks": checks, "errors": errors, "warnings": bp_warnings + wave_warnings, "summary": summary}
+    return {"passed": passed, "checks": checks, "errors": errors, "warnings": mvndr_warnings + bp_warnings + wave_warnings, "summary": summary}

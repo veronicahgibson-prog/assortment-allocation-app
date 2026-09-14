@@ -6,6 +6,7 @@ TEMP_DATASET = "CM_TEMP"
 
 EVENTS_SKU_LIST = f"`{PROJECT_ID}.{DATASET}.EVENTS_SKU_LIST`"
 CATALOG_RUN_ALT = f"`{PROJECT_ID}.{DATASET}.OBC_V_CTLG_RUN_BY_SKU_ALT`"
+CATALOG_RUN_GROUP = f"`{PROJECT_ID}.{DATASET}.OBC_V_CTLG_RUN_BY_GROUP`"
 CATALOG_RUN_ANALYTICS = f"`{PROJECT_ID}.{DATASET}.OBC_V_CTLG_RUN_BY_SKU_ANALYTICS`"
 WEEKLY_RUNS_LOG = f"`{PROJECT_ID}.{DATASET}.OBC_CTLG_WEEKLY_RUNS_SKU_LOG`"
 DC_MODEL_PARAMS = f"`{PROJECT_ID}.{DATASET}.OBC_LOG_SKU_DC_MODEL_PARAMS`"
@@ -40,14 +41,21 @@ DEFAULT_FALLBACK_ASMT_ID = 216050
 MAX_UPLOAD_MB = 10
 
 # Domestic template — no FACTORY_ID
+# SUPPLIER and MVNDR_NBR are both optional at upload time: SUPPLIER is only
+# actually required if the user follows a Vendor-Aligned strategy in Step 2
+# (enforced there by /api/match_vendor_strategy, not here — the strategy
+# isn't even chosen yet when the file is uploaded), and MVNDR_NBR was only
+# ever required to help make an ambiguous SKU list (e.g. Patio) distinct —
+# _determine_thd_key in validators.py already falls back to SKU_DESC/BP/
+# BUY_UNITS/WAVE_* to disambiguate rows when MVNDR_NBR isn't provided.
 TEMPLATE_COLUMNS_DOMESTIC = [
     {"name": "EVENT_NAME",      "type": "STRING",  "required": True},
     {"name": "EVENT_YEAR",      "type": "INT64",   "required": True},
     {"name": "THD_SKU_NBR",     "type": "INT64",   "required": True},
     {"name": "SISTER_SKU_NBR",  "type": "INT64",   "required": False, "note": "Required if net new SKU"},
     {"name": "SKU_DESC",        "type": "STRING",  "required": True},
-    {"name": "SUPPLIER",        "type": "STRING",  "required": True},
-    {"name": "MVNDR_NBR",       "type": "INT64",   "required": True},
+    {"name": "SUPPLIER",        "type": "STRING",  "required": False, "note": "Required for Vendor-Aligned strategy"},
+    {"name": "MVNDR_NBR",       "type": "INT64",   "required": False},
     {"name": "BP",              "type": "INT64",   "required": True},
     {"name": "BUY_UNITS",       "type": "INT64",   "required": True},
     {"name": "WAVE_1",          "type": "INT64",   "required": False},
@@ -64,8 +72,8 @@ TEMPLATE_COLUMNS_IMPORT = [
     {"name": "THD_SKU_NBR",     "type": "INT64",   "required": True},
     {"name": "SISTER_SKU_NBR",  "type": "INT64",   "required": False, "note": "Required if net new SKU"},
     {"name": "SKU_DESC",        "type": "STRING",  "required": True},
-    {"name": "SUPPLIER",        "type": "STRING",  "required": True},
-    {"name": "MVNDR_NBR",       "type": "INT64",   "required": True},
+    {"name": "SUPPLIER",        "type": "STRING",  "required": False, "note": "Required for Vendor-Aligned strategy"},
+    {"name": "MVNDR_NBR",       "type": "INT64",   "required": False},
     {"name": "FACTORY_ID",      "type": "INT64",   "required": True},
     {"name": "BP",              "type": "INT64",   "required": True},
     {"name": "BUY_UNITS",       "type": "INT64",   "required": True},
@@ -76,8 +84,20 @@ TEMPLATE_COLUMNS_IMPORT = [
     {"name": "WAVE_5",          "type": "INT64",   "required": False},
 ]
 
-NOT_NULL_DOMESTIC = ["EVENT_NAME", "EVENT_YEAR", "THD_SKU_NBR", "SKU_DESC", "SUPPLIER", "MVNDR_NBR", "BP", "BUY_UNITS"]
-NOT_NULL_IMPORT = ["EVENT_NAME", "EVENT_YEAR", "THD_SKU_NBR", "SKU_DESC", "SUPPLIER", "MVNDR_NBR", "FACTORY_ID", "BP", "BUY_UNITS"]
+
+# THD_SKU_NBR is deliberately excluded here: it may be null for a net-new SKU
+# as long as SISTER_SKU_NBR is populated (see the paired THD_SKU_NBR/
+# SISTER_SKU_NBR check in validators.py and the SKU-age check in app.py,
+# which is what actually decides whether the populated side has >= 365 days
+# of history). SUPPLIER is excluded too — it's optional at upload time and
+# only enforced when the user actually picks Vendor-Aligned in Step 2 (see
+# /api/match_vendor_strategy, which errors if no SUPPLIER data is present).
+# MVNDR_NBR is excluded for a different reason: validators.py fills a blank
+# MVNDR_NBR with a proxy value (distinct from every real MVNDR_NBR in the
+# file) before this list is ever checked, so it can never be null by the time
+# it matters — see the proxy-fill step there.
+NOT_NULL_DOMESTIC = ["EVENT_NAME", "EVENT_YEAR", "SKU_DESC", "BP", "BUY_UNITS"]
+NOT_NULL_IMPORT = ["EVENT_NAME", "EVENT_YEAR", "SKU_DESC", "FACTORY_ID", "BP", "BUY_UNITS"]
 
 # Allowed DFCs per event
 ALLOWED_DFCS = {
