@@ -19,13 +19,14 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from config import (
     PROJECT_ID, TEMP_DATASET, EVENTS_SKU_LIST, VENDOR_STRATEGY,
     DFC_COST_MODEL_SUBMISSION, FINAL_ALLOCATIONS, SCHN_SKU_ATTR,
+    DF_SKU_COMBO_CLT,
     TEMPLATE_COLUMNS_DOMESTIC, TEMPLATE_COLUMNS_IMPORT,
     CONTAINER_DIVISOR, STRATEGY_KEYS, MAX_UPLOAD_MB,
     ALLOWED_DFCS, DC_NAMES, CATALOG_RUN_ANALYTICS,
     OBC_RUN_KEYS_VIEW, OBC_PRE_PROC, OBC_POST_PROC, OBC_COST_BATCH_PROC,
 )
 from validators import validate_upload, _determine_thd_key
-from assortment_engine import determine_assortment_ids, start_multi_dc, fetch_multi_dc_results
+from assortment_engine import determine_assortment_ids, start_multi_dc, fetch_multi_dc_results, persist_dynamic_multi_dc_selection, check_ladder_problem_skus, apply_problem_sku_fix, check_dc_selection_eligibility
 from allocation_engine import run_allocation, fetch_results, fetch_summary, validate_results, fetch_available_dc_counts, fetch_lowest_expense_dc_count, fetch_factory_summary, is_import_run, check_vendor_dc_eligibility
 from event_history import fetch_prior_year_strategy, fetch_known_event_names
 
@@ -109,7 +110,6 @@ def api_user_info():
 def api_config():
     return jsonify({
         "strategies": STRATEGY_KEYS,
-        "dc_count_options": DC_COUNT_OPTIONS,
         "allowed_dfcs": ALLOWED_DFCS,
         "dc_names": {str(k): v for k, v in DC_NAMES.items()},
     })
@@ -191,6 +191,17 @@ def api_upload_status():
     return jsonify({"includes_imports": _resolve_is_import(event_name)})
 
 
+@app.route("/api/clear_upload_cache", methods=["POST"])
+def api_clear_upload_cache():
+    """Drops the cached upload (df, validation results, factory cubes, etc.)
+    so a file validated for one event/year/type doesn't silently carry over
+    once Step 1 switches to a different combination — called from the
+    frontend right before it re-checks that new combination's prior-year
+    strategy."""
+    _upload_cache.clear()
+    return jsonify({"cleared": True})
+
+
 @app.route("/api/resolve_sku_grp")
 def api_resolve_sku_grp():
     """The real SKU_GRP for a Run ID + Event Name, straight from the catalog run —
@@ -199,6 +210,21 @@ def api_resolve_sku_grp():
     run_id = request.args.get("run_id", "")
     event_name = request.args.get("event_name", "")
     return jsonify({"sku_grp": _resolve_sku_grp(run_id, event_name)})
+
+
+@app.route("/api/resolve_run_id")
+def api_resolve_run_id():
+    """The reverse of /api/resolve_sku_grp: given just event_name/event_year
+    (both already known from Step 1, before the user has any Run ID to type
+    in), find whichever catalog run already priced this event and hand back
+    both its RUN_ID and SKU_GRP — so Step 3 can auto-fill both fields instead
+    of making the user go find and paste in a Run ID by hand. Returns nulls
+    when no catalog run has covered this event yet (e.g. it hasn't been
+    submitted to DFC Cost Model, or the weekly pipeline hasn't caught up)."""
+    event_name = request.args.get("event_name", "")
+    event_year = request.args.get("event_year", "")
+    run_id, sku_grp = _resolve_run_id_from_event(event_name, event_year)
+    return jsonify({"run_id": run_id, "sku_grp": sku_grp})
 
 
 @app.route("/api/known_event_names")
@@ -529,8 +555,11 @@ def validate_bq():
 
         if all_skus:
             sku_list = sorted(all_skus)
+            # ITEM_CUBE pulled in the same round-trip as the age check (not a
+            # separate query) so the dimensions-found check below is free.
             age_query = f"""
-                SELECT CAST(SKU_NBR AS INT64) AS SKU_NBR, SKU_CRT_DT
+                SELECT CAST(SKU_NBR AS INT64) AS SKU_NBR, SKU_CRT_DT,
+                       ROUND(ECH_DPTH * ECH_WDTH * ECH_HGHT, 2) AS ITEM_CUBE
                 FROM {SCHN_SKU_ATTR}
                 WHERE SKU_NBR IN UNNEST(@sku_list)
                   AND LATEST_SKU_CRT_DT_FLG = TRUE
@@ -542,11 +571,14 @@ def validate_bq():
             )
             age_df = bq().query(age_query, job_config=jc).to_dataframe()
             sku_dates = {}
+            sku_cubes = {}
             for _, r in age_df.iterrows():
                 dt = r["SKU_CRT_DT"]
                 if isinstance(dt, pd.Timestamp):
                     dt = dt.date()
                 sku_dates[int(r["SKU_NBR"])] = dt
+                if pd.notna(r["ITEM_CUBE"]):
+                    sku_cubes[int(r["SKU_NBR"])] = float(r["ITEM_CUBE"])
 
             cutoff = datetime.date.today() - datetime.timedelta(days=365)
 
@@ -594,6 +626,52 @@ def validate_bq():
                 "passed": False,
                 "checks": checks,
                 "invalid_sku_count": len(invalid_rows),
+                "has_download": True,
+            })
+
+        # 2b. Item dimensions (ITEM_CUBE) must be found for whichever SKU the
+        # enrichment step actually looks up: item dimensions always come from
+        # THD_SKU_NBR (never SISTER_SKU_NBR — that column exists only to
+        # decide/back up SKU_NBR and maturity, not to source dimensions). A
+        # row with no THD_SKU_NBR, or one SCHN_SKU_ATTR has no ITEM_CUBE for,
+        # silently inserts with a NULL ITEM_CUBE, which drops that record out
+        # of the multi-DC assortment procedure's utilization/coverage
+        # decisions entirely with no error anywhere (confirmed against a real
+        # event — see Factory 2012214 / SKU 1007907912, whose THD_SKU_NBR was
+        # null).
+        missing_cube_rows = []
+        for idx, row in df.iterrows():
+            thd = int(row["THD_SKU_NBR"]) if pd.notna(row.get("THD_SKU_NBR")) else None
+
+            if thd is None or thd not in sku_cubes:
+                row_dict = {}
+                for c in df.columns:
+                    v = row[c]
+                    if pd.notna(v):
+                        row_dict[c] = int(v) if isinstance(v, float) and v == int(v) else v
+                missing_cube_rows.append({
+                    **row_dict,
+                    "INVALID_COLUMN": "THD_SKU_NBR",
+                    "INVALID_SKU": thd,
+                    "REASON": f"No ITEM_CUBE found in SCHN_SKU_ATTR for THD_SKU_NBR {thd}"
+                              if thd is not None
+                              else "No THD_SKU_NBR to look up dimensions for",
+                })
+
+        checks.append({
+            "name": "Item dimensions found for every SKU",
+            "passed": len(missing_cube_rows) == 0,
+            "detail": f"{len(missing_cube_rows)} row(s) missing ITEM_CUBE for their THD_SKU_NBR"
+                      if missing_cube_rows
+                      else "All rows' THD_SKU_NBR resolved to a known ITEM_CUBE",
+        })
+
+        if missing_cube_rows:
+            _upload_cache["invalid_skus"] = pd.DataFrame(missing_cube_rows)
+            return jsonify({
+                "passed": False,
+                "checks": checks,
+                "invalid_sku_count": len(missing_cube_rows),
                 "has_download": True,
             })
     except Exception as e:
@@ -685,21 +763,34 @@ def download_invalid_skus():
 
 # ── Section 3: Insert to BigQuery ───────────────────────────────────
 
-def _build_insert_query(source_table: str, container_divisor: int = 2390, includes_imports: bool = True) -> str:
-    """Build the enrichment INSERT query using the validated temp table as source."""
+def _build_enrichment_select(source_table: str, container_divisor: int = 2390, includes_imports: bool = True,
+                              maturity_pin_table=None) -> str:
+    """The enrichment logic's WITH...SELECT body, shared by _build_insert_query
+    (which wraps it in an INSERT INTO EVENTS_SKU_LIST) and
+    _row_data_matches_existing (which instead compares its computed
+    THD_KEY_ID's against what's already stored, without inserting anything).
+
+    maturity_pin_table: optional `{PROJECT_ID}.{TEMP_DATASET}.SKU_MATURITY_PIN_...`
+    table (built by insert_to_bq right before it deletes a prior submission for
+    the same event) holding each (THD_SKU_NBR, SISTER_SKU_NBR) pair's
+    already-decided IS_SISTER_SKU_FLAG. When given, a row matching one of those
+    pairs reuses that decision instead of recomputing SKU maturity against
+    today's date — otherwise a SKU that crosses the 365-day mark between the
+    original submission and a later re-validation of the same list would
+    silently flip from its sister-SKU proxy to the real THD_SKU_NBR, no longer
+    matching whatever SKU_NBR an existing catalog RUN_ID already priced under.
+    """
     cd = container_divisor
     factory_id_expr = "SAFE_CAST(FACTORY_ID AS INT64) AS FACTORY_ID," if includes_imports else "CAST(NULL AS INT64) AS FACTORY_ID,"
+    # COALESCE(..., -1) rather than a NULL-safe join operator so a row with no
+    # sister SKU on either side still matches on THD_SKU_NBR alone (real SKU
+    # numbers are always positive, so -1 never collides with one).
+    pin_join = f"""
+  LEFT JOIN `{maturity_pin_table}` AS PIN
+    ON OG.THD_SKU_NBR = PIN.THD_SKU_NBR
+   AND COALESCE(OG.SISTER_SKU_NBR, -1) = COALESCE(PIN.SISTER_SKU_NBR, -1)""" if maturity_pin_table else ""
+    pin_select = "PIN.IS_SISTER_SKU_FLAG AS PINNED_IS_SISTER_SKU_FLAG," if maturity_pin_table else "CAST(NULL AS BOOL) AS PINNED_IS_SISTER_SKU_FLAG,"
     return f"""
-INSERT INTO {EVENTS_SKU_LIST} (
-  EVENT_NAME, EVENT_YEAR, THD_SKU_NBR, SISTER_SKU_NBR, BP, BUY_UNITS,
-  W1_UNITS, W2_UNITS, W3_UNITS, W4_UNITS, W5_UNITS,
-  SUPPLIER, MVNDR_NBR, FACTORY_ID, SKU_NBR, SKU_DESC, IS_SISTER_SKU_FLAG,
-  LENGTH, WIDTH, HEIGHT, WEIGHT, ITEM_CUBE,
-  DEPT, CLASS, EXT_SUB_CLASS_NBR, SUB_CLASS, SKU_CRT_DT,
-  ITEM_CONTAINER, SKU_LEVEL_CONTAINERS,
-  FACTORY_CUBE, FACTORY_CONTAINERS, SKU_PCT_OF_FACTORY_CONTAINERS,
-  THD_KEY_ID
-)
 WITH SKU_LIST AS (
   SELECT
     SAFE_CAST(THD_SKU_NBR AS INT64) AS THD_SKU_NBR,
@@ -750,6 +841,7 @@ STAGED_SKU_LIST AS (
     OG.THD_SKU_NBR,
     OG.SISTER_SKU_NBR,
     OG.SKU_DESC,
+    {pin_select}
     -- Fallback description, keyed on THD_SKU_NBR. It must come from the THD SKU, never the
     -- proxy: when IS_SISTER_SKU_FLAG is true the proxy is the SISTER SKU, so falling back
     -- to the proxy's description would label the record with the sister's name.
@@ -761,19 +853,52 @@ STAGED_SKU_LIST AS (
     THD.DEPT AS THD_DEPT, THD.CLASS AS THD_CLASS,
     THD.SUB_CLASS AS THD_SUB_CLASS, THD.EXT_SUB_CLASS_NBR AS THD_EXT_SUB_CLASS_NBR,
     SIS.SKU_CRT_DT AS SIS_SKU_CRT_DT,
+    -- Dimension/cube fallback source: THD_SKU_NBR's own dimensions always win
+    -- when present: only fall back to the SISTER SKU's dimensions when THD's
+    -- are missing (e.g. a genuinely new item with no THD dimensions yet) —
+    -- see RESOLVED_* below in FINAL_LOGIC_APPLIED.
+    SIS.LENGTH AS SIS_LENGTH, SIS.WIDTH AS SIS_WIDTH,
+    SIS.HEIGHT AS SIS_HEIGHT, SIS.WEIGHT AS SIS_WEIGHT,
+    SIS.ITEM_CUBE AS SIS_ITEM_CUBE,
+    SIS.DEPT AS SIS_DEPT, SIS.CLASS AS SIS_CLASS,
+    SIS.SUB_CLASS AS SIS_SUB_CLASS, SIS.EXT_SUB_CLASS_NBR AS SIS_EXT_SUB_CLASS_NBR,
     DATE_DIFF(CURRENT_DATE(), DATE(THD.SKU_CRT_DT), DAY) AS THD_DAYS,
     DATE_DIFF(CURRENT_DATE(), DATE(SIS.SKU_CRT_DT), DAY) AS SIS_DAYS
   FROM SKU_LIST OG
   LEFT JOIN SKU_ATTR AS THD ON OG.THD_SKU_NBR = THD.SKU_NBR
   LEFT JOIN SKU_ATTR AS SIS ON OG.SISTER_SKU_NBR = SIS.SKU_NBR
+  {pin_join}
 ),
 FINAL_LOGIC_APPLIED AS (
   SELECT *,
     CASE
+      -- A pinned decision (from a prior submission for this same event) always
+      -- wins over a fresh recompute — see maturity_pin_table above.
+      WHEN PINNED_IS_SISTER_SKU_FLAG IS NOT NULL THEN PINNED_IS_SISTER_SKU_FLAG
       WHEN COALESCE(THD_DAYS, 0) < 365 AND COALESCE(SIS_DAYS, 0) >= 365 THEN TRUE
       ELSE FALSE
     END AS IS_SISTER_SKU_FLAG
   FROM STAGED_SKU_LIST
+),
+DIMENSIONS_RESOLVED AS (
+  -- Dimension/cube priority: THD_SKU_NBR's own dimensions always win when
+  -- present; only fall back to the SISTER SKU's dimensions when THD's are
+  -- missing (a new item with no THD attributes yet, or no THD_SKU_NBR at
+  -- all). This is independent of IS_SISTER_SKU_FLAG, which only decides
+  -- SKU_NBR/maturity — a record can be flagged IS_SISTER_SKU_FLAG and still
+  -- have perfectly good THD dimensions (as here), or not.
+  SELECT *,
+    COALESCE(THD_LENGTH, SIS_LENGTH) AS RESOLVED_LENGTH,
+    COALESCE(THD_WIDTH, SIS_WIDTH) AS RESOLVED_WIDTH,
+    COALESCE(THD_HEIGHT, SIS_HEIGHT) AS RESOLVED_HEIGHT,
+    COALESCE(THD_WEIGHT, SIS_WEIGHT) AS RESOLVED_WEIGHT,
+    COALESCE(THD_ITEM_CUBE, SIS_ITEM_CUBE) AS RESOLVED_ITEM_CUBE,
+    COALESCE(THD_DEPT, SIS_DEPT) AS RESOLVED_DEPT,
+    COALESCE(THD_CLASS, SIS_CLASS) AS RESOLVED_CLASS,
+    COALESCE(THD_SUB_CLASS, SIS_SUB_CLASS) AS RESOLVED_SUB_CLASS,
+    COALESCE(THD_EXT_SUB_CLASS_NBR, SIS_EXT_SUB_CLASS_NBR) AS RESOLVED_EXT_SUB_CLASS_NBR,
+    COALESCE(THD_SKU_CRT_DT, SIS_SKU_CRT_DT) AS RESOLVED_SKU_CRT_DT
+  FROM FINAL_LOGIC_APPLIED
 ),
 ROUNDED AS (
   -- Buy-pack round-up computed ONCE. It used to be repeated inline six times, which is how
@@ -868,6 +993,11 @@ SELECT
      SAFE_DIVIDE(SKU_CONTAINERS_RAW,
                  SUM(SKU_CONTAINERS_RAW) OVER (PARTITION BY FACTORY_ID)) * 100,
      NULL) AS SKU_PCT_OF_FACTORY_CONTAINERS,
+  -- The exact Step-1 selection, stored directly rather than left to be
+  -- reverse-engineered later from a rounded ITEM_CONTAINER value (which can
+  -- only ever approximate it, since ITEM_CONTAINER = ITEM_CUBE / this value
+  -- is stored rounded to 4 decimal places).
+  {cd} AS CONTAINER_DIVISOR,
   -- THE RECORD GRAIN. Every field aliased to its COLUMN name on purpose: TO_JSON_STRING
   -- keys the JSON by field name, so an unaliased or renamed expression hashes differently
   -- than a recompute from the stored row. Must stay byte-identical to the standalone
@@ -888,6 +1018,59 @@ SELECT
   ))) AS THD_KEY_ID
 FROM MEASURED
 """
+
+
+def _build_insert_query(source_table: str, container_divisor: int = 2390, includes_imports: bool = True,
+                         maturity_pin_table=None) -> str:
+    """Build the enrichment INSERT query using the validated temp table as source —
+    _build_enrichment_select's WITH...SELECT body wrapped in the actual
+    INSERT INTO EVENTS_SKU_LIST statement."""
+    return f"""
+INSERT INTO {EVENTS_SKU_LIST} (
+  EVENT_NAME, EVENT_YEAR, THD_SKU_NBR, SISTER_SKU_NBR, BP, BUY_UNITS,
+  W1_UNITS, W2_UNITS, W3_UNITS, W4_UNITS, W5_UNITS,
+  SUPPLIER, MVNDR_NBR, FACTORY_ID, SKU_NBR, SKU_DESC, IS_SISTER_SKU_FLAG,
+  LENGTH, WIDTH, HEIGHT, WEIGHT, ITEM_CUBE,
+  DEPT, CLASS, EXT_SUB_CLASS_NBR, SUB_CLASS, SKU_CRT_DT,
+  ITEM_CONTAINER, SKU_LEVEL_CONTAINERS,
+  FACTORY_CUBE, FACTORY_CONTAINERS, SKU_PCT_OF_FACTORY_CONTAINERS,
+  CONTAINER_DIVISOR,
+  THD_KEY_ID
+)
+{_build_enrichment_select(source_table, container_divisor, includes_imports, maturity_pin_table)}
+"""
+
+
+def _row_data_matches_existing(client, source_table: str, container_divisor: int, includes_imports: bool,
+                                event_name: str, event_year: int) -> bool:
+    """Whether this upload's rows, once enriched, would be byte-for-byte the
+    same set already sitting in EVENTS_SKU_LIST for this event — compared via
+    THD_KEY_ID (already a fingerprint of every field that matters: THD/SISTER
+    SKU, BP, BUY_UNITS, waves, SUPPLIER, MVNDR_NBR, FACTORY_ID) rather than
+    duplicating a field-by-field diff. Ignores the maturity-pin question
+    entirely (deliberately built with maturity_pin_table=None) — THD_KEY_ID
+    doesn't depend on IS_SISTER_SKU_FLAG, so whether that gets pinned or
+    recomputed can't affect this comparison either way."""
+    query = f"""
+        WITH new_data AS (
+            {_build_enrichment_select(source_table, container_divisor, includes_imports)}
+        ),
+        old_data AS (
+            SELECT THD_KEY_ID FROM {EVENTS_SKU_LIST}
+            WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+        )
+        SELECT
+          (SELECT COUNT(*) FROM new_data) AS new_count,
+          (SELECT COUNT(*) FROM old_data) AS old_count,
+          (SELECT COUNT(*) FROM (SELECT THD_KEY_ID FROM new_data EXCEPT DISTINCT SELECT THD_KEY_ID FROM old_data)) AS added_count,
+          (SELECT COUNT(*) FROM (SELECT THD_KEY_ID FROM old_data EXCEPT DISTINCT SELECT THD_KEY_ID FROM new_data)) AS removed_count
+    """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ])
+    row = next(iter(client.query(query, job_config=job_config).result()))
+    return row.new_count == row.old_count and row.added_count == 0 and row.removed_count == 0
 
 
 @app.route("/api/check_insert_status", methods=["POST"])
@@ -983,6 +1166,92 @@ def check_insert_status():
         return jsonify({"already_inserted": False})
 
 
+def _ensure_validation_table_staged(df, event_name, event_year):
+    """Loads the cached upload into a BigQuery temp table if it isn't staged
+    yet (both insert_to_bq and api_check_upload_unchanged need this same
+    table as the enrichment query's source), caching the table id on
+    _upload_cache so a later call in the same request cycle reuses it
+    instead of re-staging. Raises on failure — callers decide how to report
+    it."""
+    validation_table = _upload_cache.get("validation_table")
+    if validation_table:
+        return validation_table
+    safe_event = _sanitize_table_name(event_name) if event_name else "UPLOAD"
+    table_id = f"{PROJECT_ID}.{TEMP_DATASET}.VALIDATION_{safe_event}_{event_year}"
+    jc = bigquery.LoadJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+    bq().load_table_from_dataframe(_ensure_insert_columns(df), table_id, job_config=jc).result()
+    _upload_cache["validation_table"] = table_id
+    return table_id
+
+
+@app.route("/api/check_upload_unchanged", methods=["POST"])
+def api_check_upload_unchanged():
+    """Whether resubmitting the currently-uploaded file for this event would
+    be a genuine no-op: the enriched row data matches what's already in
+    EVENTS_SKU_LIST (via _row_data_matches_existing's THD_KEY_ID comparison)
+    AND this session's DC/vendor selection matches what's already recorded
+    there (or, for DC Selection's Include/Exclude filter, on
+    DFC_COST_MODEL_SUBMISSION). Lets the frontend skip the whole
+    delete/reinsert/resubmit cycle when the answer is yes, instead of
+    redoing real BigQuery work for a replacement that changes nothing.
+    Always answers {"unchanged": False} on anything uncertain (no cached
+    upload, event doesn't exist yet, a query error) — the caller should just
+    proceed with its normal replace flow in that case, not treat this as a
+    hard failure."""
+    df = _upload_cache.get("df")
+    event_name = _upload_cache.get("event_name", "")
+    event_year = _upload_cache.get("event_year", 2026)
+    if df is None or not event_name:
+        return jsonify({"unchanged": False})
+
+    body = request.get_json(silent=True) or {}
+    vendor_matches = body.get("vendor_matches") or []
+    dc_inclusions = body.get("dc_inclusions") or []
+    dc_exclusions = body.get("dc_exclusions") or []
+    campus_pairs = body.get("campus_pairs") or []
+    container_divisor = int(body.get("container_divisor", CONTAINER_DIVISOR))
+    if container_divisor <= 0:
+        container_divisor = CONTAINER_DIVISOR
+    includes_imports = _upload_cache.get("includes_imports", False)
+
+    try:
+        client = bq()
+        cnt_query = f"""
+            SELECT COUNT(*) AS cnt FROM {EVENTS_SKU_LIST}
+            WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @event_year
+        """
+        cnt_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("event_name", "STRING", event_name.upper()),
+            bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+        ])
+        cnt = next(iter(client.query(cnt_query, job_config=cnt_config).result())).cnt
+        if cnt == 0:
+            # Nothing on file yet — this is a first-time insert, not a
+            # "replace," so there's no meaningful "unchanged" to report.
+            return jsonify({"unchanged": False})
+
+        validation_table = _ensure_validation_table_staged(df, event_name, event_year)
+        if not _row_data_matches_existing(client, validation_table, container_divisor, includes_imports,
+                                           event_name, event_year):
+            return jsonify({"unchanged": False, "reason": "row_data_changed"})
+
+        if vendor_matches:
+            selection_matches = _vendor_selection_matches_existing(client, event_name, event_year, vendor_matches)
+        else:
+            selection_matches = _campus_pairs_match_existing(client, event_name, event_year, campus_pairs)
+            if selection_matches:
+                project_name = f"{event_year} {event_name}"
+                key = f"{CURRENT_USER}-{project_name}-{project_name}"
+                selection_matches = _dc_filter_matches_existing(client, key, dc_inclusions, dc_exclusions)
+        if not selection_matches:
+            return jsonify({"unchanged": False, "reason": "selection_changed"})
+
+        return jsonify({"unchanged": True})
+    except Exception as e:
+        logger.exception("check_upload_unchanged error")
+        return jsonify({"unchanged": False, "error": str(e)})
+
+
 @app.route("/api/insert", methods=["POST"])
 def insert_to_bq():
     df = _upload_cache.get("df")
@@ -994,6 +1263,13 @@ def insert_to_bq():
 
     body = request.get_json(silent=True) or {}
     overwrite = body.get("overwrite", False)
+    # Only meaningful alongside overwrite: True means the user deliberately
+    # wants this replacement treated as a new baseline (today's SKU maturity
+    # recomputed fresh, e.g. because they intend to generate a brand-new
+    # RUN_ID off of it), False (default) pins to whatever maturity decision
+    # this event's prior rows already used — see _build_insert_query's
+    # maturity_pin_table docstring.
+    recompute_maturity = bool(body.get("recompute_maturity", False))
 
     # Check event doesn't already exist in EVENTS_SKU_LIST
     try:
@@ -1013,33 +1289,46 @@ def insert_to_bq():
                 "message": f"'{event_name}' ({event_year}) already has {cnt:,} rows in EVENTS_SKU_LIST.",
                 "row_count": cnt,
             })
+        maturity_pin_table = None
         if cnt > 0 and overwrite:
+            if not recompute_maturity:
+                # Snapshot each already-decided (THD_SKU_NBR, SISTER_SKU_NBR) ->
+                # IS_SISTER_SKU_FLAG pairing before wiping the old rows — see
+                # _build_insert_query's maturity_pin_table docstring for why:
+                # without this, re-validating the same list re-derives SKU
+                # maturity against today's date and can silently flip a SKU off
+                # its sister-SKU proxy, no longer matching whatever SKU_NBR an
+                # existing catalog RUN_ID already priced under. Skipped
+                # entirely when the caller explicitly wants a fresh baseline
+                # (recompute_maturity=True) — e.g. because they intend to
+                # generate a brand-new RUN_ID off today's actual SKU maturity.
+                safe_event = _sanitize_table_name(event_name) if event_name else "UPLOAD"
+                pin_table_id = f"{PROJECT_ID}.{TEMP_DATASET}.SKU_MATURITY_PIN_{safe_event}_{event_year}"
+                snapshot_query = f"""
+                    CREATE OR REPLACE TABLE `{pin_table_id}` AS
+                    SELECT DISTINCT THD_SKU_NBR, SISTER_SKU_NBR, IS_SISTER_SKU_FLAG
+                    FROM {EVENTS_SKU_LIST}
+                    WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @event_year
+                """
+                bq().query(snapshot_query, job_config=job_config).result()
+                maturity_pin_table = pin_table_id
+
             delete_query = f"""
                 DELETE FROM {EVENTS_SKU_LIST}
                 WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @event_year
             """
             bq().query(delete_query, job_config=job_config).result()
             logger.info(f"Deleted {cnt} existing rows for {event_name} {event_year}")
+        _upload_cache["maturity_pin_table"] = maturity_pin_table
     except Exception as e:
         logger.exception("Event duplicate check failed")
         return jsonify({"error": f"Failed to check for existing event: {e}"}), 500
 
-    validation_table = _upload_cache.get("validation_table")
-
-    # Upload df to temp table if not already staged
-    if not validation_table:
-        safe_event = _sanitize_table_name(event_name) if event_name else "UPLOAD"
-        table_id = f"{PROJECT_ID}.{TEMP_DATASET}.VALIDATION_{safe_event}_{event_year}"
-        try:
-            jc = bigquery.LoadJobConfig(
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-            )
-            bq().load_table_from_dataframe(_ensure_insert_columns(df), table_id, job_config=jc).result()
-            validation_table = table_id
-            _upload_cache["validation_table"] = table_id
-        except Exception as e:
-            logger.exception("Failed to create temp table")
-            return jsonify({"error": f"Failed to stage data: {e}"}), 500
+    try:
+        validation_table = _ensure_validation_table_staged(df, event_name, event_year)
+    except Exception as e:
+        logger.exception("Failed to stage data")
+        return jsonify({"error": f"Failed to stage data: {e}"}), 500
 
     container_divisor = int(body.get("container_divisor", CONTAINER_DIVISOR))
     if container_divisor <= 0:
@@ -1049,7 +1338,8 @@ def insert_to_bq():
     row_count = len(df)
 
     try:
-        insert_sql = _build_insert_query(validation_table, container_divisor, includes_imports)
+        insert_sql = _build_insert_query(validation_table, container_divisor, includes_imports,
+                                          maturity_pin_table=_upload_cache.get("maturity_pin_table"))
         job = bq().query(insert_sql)
         job.result()
         rows_inserted = job.num_dml_affected_rows or row_count
@@ -1057,6 +1347,7 @@ def insert_to_bq():
         # Keep the validated frame available for vendor matching and SKU-level
         # DC overrides after the event has been inserted.
         _upload_cache.pop("validation_table", None)
+        _upload_cache.pop("maturity_pin_table", None)
         return jsonify({
             "success": True,
             "message": f"Inserted {rows_inserted} enriched rows into EVENTS_SKU_LIST.",
@@ -1082,7 +1373,12 @@ def api_vendor_strategy():
 
 @app.route("/api/match_vendor_strategy", methods=["POST"])
 def api_match_vendor_strategy():
-    """Match uploaded suppliers to VENDOR_ALIGNED_STRATEGY using fuzzy LIKE."""
+    """Match uploaded suppliers to VENDOR_ALIGNED_STRATEGY using fuzzy LIKE.
+
+    Vendor-Aligned is always one whole-event strategy — the Bulk/Parcel
+    strategy split (see /api/classify_stock_type) only ever applies to DC
+    Selection, since a vendor's DC assignment is driven by who the supplier
+    is, not by whether their SKUs ship bulk or parcel."""
     body = request.get_json(silent=True) or {}
     event_name = body.get("event_name") or _upload_cache.get("event_name", "")
 
@@ -1333,6 +1629,394 @@ def api_vendor_skus():
     })
 
 
+_STOCK_TYPE_QUERY = f"""
+    WITH CBO AS (
+      SELECT T.COMPONENTSKU, T.COMBOTYPEDESC
+      FROM (
+        SELECT T0.COMPONENTSKU, T0.COMBOTYPEDESC,
+          ROW_NUMBER() OVER (
+            PARTITION BY T0.COMPONENTSKU ORDER BY COUNT(T0.COMBOTYPEDESC) DESC
+          ) AS RN
+        FROM {DF_SKU_COMBO_CLT} AS T0
+        GROUP BY T0.COMPONENTSKU, T0.COMBOTYPEDESC
+      ) AS T
+      WHERE T.RN = 1
+    )
+    SELECT DISTINCT
+      SAFE_CAST(X.SKU_NBR AS INT64) AS SKU_NBR,
+      CASE
+        -- Hardcoded profile classifications based on vendor value-add setups
+        WHEN Y.COMBOTYPEDESC = 'VAS - Blind' THEN 'BULK'
+
+        -- Specific sub-department and structural hierarchy exemptions forcing a Bulk profile
+        WHEN X.SUB_DEPT_NBR = '023F' AND X.CLASS_NBR = 1  AND X.SUB_CLASS_NBR <> 19 THEN 'BULK'
+        WHEN X.SUB_DEPT_NBR = '023F' AND X.CLASS_NBR = 10 AND X.SUB_CLASS_NBR <> 18 THEN 'BULK'
+        WHEN X.SUB_DEPT_NBR = '023F' AND X.CLASS_NBR = 11 AND X.SUB_CLASS_NBR <> 18 THEN 'BULK'
+        WHEN X.SUB_DEPT_NBR = '023F' AND X.CLASS_NBR = 24 AND X.SUB_CLASS_NBR <> 4  THEN 'BULK'
+        WHEN X.SUB_DEPT_NBR = '023F' AND X.CLASS_NBR = 6  THEN 'BULK'
+
+        -- Dimensional eligibility criteria for parcel distribution, checked EACH -> IPK -> CASE -> PLT
+        WHEN X.ECH_QTY = 1
+          AND GREATEST(X.ECH_DPTH * 12, X.ECH_HGHT * 12, X.ECH_WDTH * 12) <= 40
+          AND (X.ECH_DPTH * 12 + X.ECH_HGHT * 12 + X.ECH_WDTH * 12)
+              - GREATEST(X.ECH_DPTH * 12, X.ECH_HGHT * 12, X.ECH_WDTH * 12)
+              - LEAST(X.ECH_DPTH * 12, X.ECH_HGHT * 12, X.ECH_WDTH * 12) <= 26.25
+          AND LEAST(X.ECH_DPTH * 12, X.ECH_HGHT * 12, X.ECH_WDTH * 12) <= 25
+          AND X.ECH_WGHT <= 75 THEN 'PARCEL'
+
+        WHEN X.IPK_QTY = 1
+          AND GREATEST(X.IPK_DPTH * 12, X.IPK_HGHT * 12, X.IPK_WDTH * 12) <= 40
+          AND (X.IPK_DPTH * 12 + X.IPK_HGHT * 12 + X.IPK_WDTH * 12)
+              - GREATEST(X.IPK_DPTH * 12, X.IPK_HGHT * 12, X.IPK_WDTH * 12)
+              - LEAST(X.IPK_DPTH * 12, X.IPK_HGHT * 12, X.IPK_WDTH * 12) <= 26.25
+          AND LEAST(X.IPK_DPTH * 12, X.IPK_HGHT * 12, X.IPK_WDTH * 12) <= 25
+          AND X.IPK_WGHT <= 75 THEN 'PARCEL'
+
+        WHEN X.CASE_QTY = 1
+          AND GREATEST(X.CASE_DPTH * 12, X.CASE_HGHT * 12, X.CASE_WDTH * 12) <= 40
+          AND (X.CASE_DPTH * 12 + X.CASE_HGHT * 12 + X.CASE_WDTH * 12)
+              - GREATEST(X.CASE_DPTH * 12, X.CASE_HGHT * 12, X.CASE_WDTH * 12)
+              - LEAST(X.CASE_DPTH * 12, X.CASE_HGHT * 12, X.CASE_WDTH * 12) <= 26.25
+          AND LEAST(X.CASE_DPTH * 12, X.CASE_HGHT * 12, X.CASE_WDTH * 12) <= 25
+          AND X.CASE_WGHT <= 75 THEN 'PARCEL'
+
+        WHEN X.PLT_QTY = 1
+          AND GREATEST(X.PLT_DPTH * 12, X.PLT_HGHT * 12, X.PLT_WDTH * 12) <= 40
+          AND (X.PLT_DPTH * 12 + X.PLT_HGHT * 12 + X.PLT_WDTH * 12)
+              - GREATEST(X.PLT_DPTH * 12, X.PLT_HGHT * 12, X.PLT_WDTH * 12)
+              - LEAST(X.PLT_DPTH * 12, X.PLT_HGHT * 12, X.PLT_WDTH * 12) <= 26.25
+          AND LEAST(X.PLT_DPTH * 12, X.PLT_HGHT * 12, X.PLT_WDTH * 12) <= 25
+          AND X.PLT_WGHT <= 75 THEN 'PARCEL'
+
+        -- Data integrity safety catches to flag incomplete operational dimensions based on hierarchy
+        WHEN X.ECH_QTY = 1 AND (GREATEST(X.ECH_DPTH, X.ECH_HGHT, X.ECH_WDTH) IS NULL OR X.ECH_WGHT IS NULL) THEN 'MISSING_DATA'
+        WHEN X.IPK_QTY = 1 AND (GREATEST(X.IPK_DPTH, X.IPK_HGHT, X.IPK_WDTH) IS NULL OR X.IPK_WGHT IS NULL) THEN 'MISSING_DATA'
+        WHEN X.CASE_QTY = 1 AND (GREATEST(X.CASE_DPTH, X.CASE_HGHT, X.CASE_WDTH) IS NULL OR X.CASE_WGHT IS NULL) THEN 'MISSING_DATA'
+        WHEN X.PLT_QTY = 1 AND (GREATEST(X.PLT_DPTH, X.PLT_HGHT, X.PLT_WDTH) IS NULL OR X.PLT_WGHT IS NULL) THEN 'MISSING_DATA'
+
+        ELSE 'BULK'
+      END AS STOCK_TYPE
+    FROM {SCHN_SKU_ATTR} AS X
+    LEFT JOIN CBO AS Y ON X.SKU_NBR = Y.COMPONENTSKU
+    WHERE SAFE_CAST(X.SKU_NBR AS INT64) IN UNNEST(@sku_list)
+      AND X.LATEST_SKU_CRT_DT_FLG = TRUE
+"""
+
+
+@app.route("/api/classify_stock_type", methods=["POST"])
+def api_classify_stock_type():
+    """Opt-in Step 2 feature: classify each uploaded row as BULK, PARCEL, or
+    MISSING_DATA per Supply Chain's stocking-type logic (SCHN_SKU_ATTR
+    dimensions/weight plus DF_SKU_COMBO_CLT combo type). Only runs when the
+    user explicitly turns on bulk/parcel strategy splitting — it is never
+    part of the standard upload/insert enrichment.
+
+    Reads the validated Step 1 upload (_upload_cache["df"]) rather than
+    EVENTS_SKU_LIST, because EVENTS_SKU_LIST isn't populated for this event
+    until AFTER a strategy is picked and /api/insert runs (see setupInsert in
+    app.js) — this toggle has to work before that, above the strategy cards.
+
+    Classification is keyed by THD_SKU_NBR — the real item being allocated —
+    never by EVENTS_SKU_LIST's resolved SKU_NBR column, which is a maturity
+    proxy (falls back to SISTER_SKU_NBR per IS_SISTER_SKU_FLAG) meant for the
+    DFC cost-model submission, not a physical stocking-type determination.
+    SISTER_SKU_NBR is used here only as a last resort, for a genuinely
+    net-new record with no THD_SKU_NBR at all. A physical SKU with no
+    SCHN_SKU_ATTR row at all (not merely one whose dimensions are null) is
+    also reported as MISSING_DATA rather than silently defaulting to BULK,
+    since that's a data-completeness gap the original stocking-type query
+    would otherwise just drop.
+    """
+    df = _upload_cache.get("df")
+    if df is None or len(df) == 0:
+        return jsonify({"error": "Please upload and validate a SKU list first."}), 400
+
+    includes_imports = _upload_cache.get("includes_imports", False)
+    key_cols = [c for c in _determine_thd_key(df, includes_imports) if c in df.columns]
+    work = df.copy()
+    work["THD_KEY"] = work[key_cols].fillna("__NULL__").astype(str).agg("|".join, axis=1)
+
+    def numeric_int(value):
+        try:
+            return int(float(str(value).replace(",", "").strip()))
+        except (TypeError, ValueError):
+            return None
+
+    def physical_sku_nbr(row):
+        # THD_SKU_NBR is the real item — always preferred. SISTER_SKU_NBR is
+        # only a stand-in for a net-new record that has no THD_SKU_NBR yet;
+        # it is NEVER used just because a maturity flag says so, unlike
+        # EVENTS_SKU_LIST's resolved SKU_NBR column.
+        for col in ("THD_SKU_NBR", "SISTER_SKU_NBR"):
+            if col in row.index and pd.notna(row[col]):
+                value = numeric_int(row[col])
+                if value is not None:
+                    return value
+        return None
+
+    work["_PHYSICAL_SKU_NBR"] = work.apply(physical_sku_nbr, axis=1)
+    sku_list = sorted({v for v in work["_PHYSICAL_SKU_NBR"].tolist() if v is not None})
+
+    stock_types = {}
+    if sku_list:
+        try:
+            stock_config = bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ArrayQueryParameter("sku_list", "INT64", sku_list),
+            ])
+            for row in bq().query(_STOCK_TYPE_QUERY, job_config=stock_config).result():
+                if row.SKU_NBR is not None:
+                    stock_types[int(row.SKU_NBR)] = row.STOCK_TYPE
+        except Exception as e:
+            logger.exception("classify_stock_type classification query failed")
+            return jsonify({"error": f"Failed to classify SKUs: {e}"}), 500
+
+    rows = []
+    for _, r in work.iterrows():
+        physical_sku = r["_PHYSICAL_SKU_NBR"]
+        stock_type = stock_types.get(physical_sku, "MISSING_DATA") if physical_sku is not None else "MISSING_DATA"
+        rows.append({
+            "thd_key": r["THD_KEY"],
+            "thd_sku_nbr": numeric_int(r["THD_SKU_NBR"]) if pd.notna(r.get("THD_SKU_NBR")) else None,
+            "sister_sku_nbr": numeric_int(r["SISTER_SKU_NBR"]) if pd.notna(r.get("SISTER_SKU_NBR")) else None,
+            "physical_sku_nbr": physical_sku,
+            "sku_desc": r.get("SKU_DESC") or "",
+            "buy_units": numeric_int(r["BUY_UNITS"]) if pd.notna(r.get("BUY_UNITS")) else None,
+            "stock_type": stock_type,
+        })
+
+    # Group rows that share the exact same physical_sku_nbr (the same
+    # THD_SKU_NBR bought from two vendors/buy-packs, or two net-new rows both
+    # proxying the same SISTER_SKU_NBR because neither has a THD_SKU_NBR of
+    # its own). These are ALREADY classified identically by construction
+    # (same stock_types.get(physical_sku_nbr) lookup) — this grouping never
+    # creates a new MISSING_DATA row, it only keeps a manual override from
+    # desyncing the rest of the group later.
+    #
+    # Deliberately NOT grouped here: two rows with DIFFERENT physical_sku_nbr
+    # that merely share a raw SISTER_SKU_NBR (one physical item's own
+    # proxy-for-pricing-history happens to equal another, unrelated item's).
+    # That used to force the two into one group here, and when a SISTER_SKU_
+    # NBR is reused broadly across many genuinely unrelated SKUs, one shared
+    # proxy value could drag dozens of otherwise-fine rows into MISSING_DATA
+    # over a collision that, in the vast majority of cases, never actually
+    # happens — IS_SISTER_SKU_FLAG (decided later, in BigQuery, from
+    # maturity dates) only resolves a row to that shared SISTER_SKU_NBR when
+    # its OWN item is still young; most rows sharing a proxy never do. See
+    # _find_cross_segment_sku_conflicts, called at submission time, for the
+    # much narrower, actually-accurate check this replaced: it queries each
+    # row's REAL resolved SKU_NBR post-insert and flags a segment split only
+    # for the SKU_NBRs that turn out to genuinely collide.
+    physical_sku_groups = {}
+    for row in rows:
+        if row["physical_sku_nbr"] is not None:
+            physical_sku_groups.setdefault(row["physical_sku_nbr"], []).append(row["thd_key"])
+
+    for group_thd_keys in physical_sku_groups.values():
+        if len(group_thd_keys) > 1:
+            for thd_key in group_thd_keys:
+                next(row for row in rows if row["thd_key"] == thd_key)["group_size"] = len(group_thd_keys)
+
+    counts = {"BULK": 0, "PARCEL": 0, "MISSING_DATA": 0}
+    for row in rows:
+        counts[row["stock_type"]] = counts.get(row["stock_type"], 0) + 1
+
+    # Cached so the Step 2 strategy split (and the download/export below) can
+    # consume it without re-querying. stock_type_by_sku is keyed by physical
+    # SKU_NBR, not THD_KEY: stocking type is a property of the physical item,
+    # so every row sharing that SKU_NBR shares its result. stock_type_rows is
+    # the exact row list just returned, so the download reflects what the
+    # confirmation panel showed rather than a fresh (possibly different, if
+    # BigQuery data changed mid-session) recompute. stock_type_consistency_
+    # groups lets /api/override_stock_type propagate one row's override to
+    # every other row sharing its physical_sku_nbr.
+    _upload_cache["stock_type_by_sku"] = stock_types
+    _upload_cache["stock_type_overrides"] = {}
+    _upload_cache["stock_type_rows"] = rows
+    _upload_cache["stock_type_consistency_groups"] = {
+        sku: group_thd_keys for sku, group_thd_keys in physical_sku_groups.items() if len(group_thd_keys) > 1
+    }
+    return jsonify({"rows": rows, "counts": counts, "total": len(rows)})
+
+
+@app.route("/api/override_stock_type", methods=["POST"])
+def api_override_stock_type():
+    """Manually set one uploaded row's BULK/PARCEL classification, overriding
+    the SCHN_SKU_ATTR-derived result from /api/classify_stock_type. Meant for
+    MISSING_DATA rows the confirmation panel can't resolve on its own, and
+    for any row a user disagrees with. Keyed by THD_KEY (this specific
+    upload row), not by SKU_NBR, so an override never silently spreads to a
+    different row — EXCEPT when that row shares its exact physical_sku_nbr
+    with other rows (see /api/classify_stock_type): those are the same
+    physical item bought under two different vendors/buy-packs, so
+    overriding one has to override the rest identically too."""
+    if "stock_type_by_sku" not in _upload_cache:
+        return jsonify({"error": "Run bulk/parcel classification before overriding a row."}), 400
+
+    body = request.get_json(silent=True) or {}
+    thd_key = body.get("thd_key")
+    stock_type = body.get("stock_type")
+    if not thd_key or stock_type not in ("BULK", "PARCEL"):
+        return jsonify({"error": "thd_key and a valid stock_type (BULK or PARCEL) are required."}), 400
+
+    thd_keys_to_update = {thd_key}
+    for group in _upload_cache.get("stock_type_consistency_groups", {}).values():
+        if thd_key in group:
+            thd_keys_to_update.update(group)
+
+    overrides = _upload_cache.setdefault("stock_type_overrides", {})
+    for key in thd_keys_to_update:
+        overrides[key] = stock_type
+    return jsonify({"success": True, "thd_keys": sorted(thd_keys_to_update), "stock_type": stock_type})
+
+
+@app.route("/api/undo_stock_type_override", methods=["POST"])
+def api_undo_stock_type_override():
+    """Clears a manual override set via /api/override_stock_type, reverting
+    that row (and any physical_sku_nbr consistency-group siblings — same
+    grouping /api/override_stock_type applies) back to the SCHN_SKU_ATTR-
+    derived classification from /api/classify_stock_type."""
+    if "stock_type_by_sku" not in _upload_cache:
+        return jsonify({"error": "Run bulk/parcel classification before undoing an override."}), 400
+
+    body = request.get_json(silent=True) or {}
+    thd_key = body.get("thd_key")
+    if not thd_key:
+        return jsonify({"error": "thd_key is required."}), 400
+
+    thd_keys_to_clear = {thd_key}
+    for group in _upload_cache.get("stock_type_consistency_groups", {}).values():
+        if thd_key in group:
+            thd_keys_to_clear.update(group)
+
+    overrides = _upload_cache.setdefault("stock_type_overrides", {})
+    for key in thd_keys_to_clear:
+        overrides.pop(key, None)
+    return jsonify({"success": True, "thd_keys": sorted(thd_keys_to_clear)})
+
+
+def _effective_stock_type_rows():
+    """This session's classification rows with any manual overrides applied
+    on top — the single source of truth every other bulk/parcel consumer
+    (download, segmented strategy submission) should read from, so an
+    override made in the confirmation panel is never silently ignored
+    downstream."""
+    rows = _upload_cache.get("stock_type_rows") or []
+    overrides = _upload_cache.get("stock_type_overrides") or {}
+    return [
+        {**row, "stock_type": overrides.get(row["thd_key"], row["stock_type"])}
+        for row in rows
+    ]
+
+
+def _physical_skus_by_stock_type():
+    """{"BULK": [...], "PARCEL": [...]} physical SKU_NBRs, from this
+    session's effective classification — the set /api/submit_cost_model
+    passes to _physical_sku_filter_sql_and_params for each segment. Rows
+    still stuck on MISSING_DATA are deliberately left out of both buckets:
+    the Step 2 confirmation panel already blocks "Confirm Classification"
+    until none remain, so reaching submission with any left is a bug
+    upstream, not something to silently guess into a segment here."""
+    by_type = {"BULK": set(), "PARCEL": set()}
+    for row in _effective_stock_type_rows():
+        if row["stock_type"] in by_type and row["physical_sku_nbr"] is not None:
+            by_type[row["stock_type"]].add(row["physical_sku_nbr"])
+    return {k: sorted(v) for k, v in by_type.items()}
+
+
+def _find_cross_segment_sku_conflicts(client, event_name, event_year, physical_skus_by_type):
+    """The real, narrow version of the consistency check /api/classify_stock_
+    type used to do broadly (and wrongly) by unioning every row that merely
+    shared a raw SISTER_SKU_NBR: query each row's ACTUAL resolved SKU_NBR
+    (decided by BigQuery's maturity comparison at insert time — IS_SISTER_
+    SKU_FLAG — which pre-insert classification can't see), and flag a
+    genuine problem only where that resolved SKU_NBR actually has rows
+    landing in both segments. Almost always empty in practice: a SISTER_
+    SKU_NBR being reused across many rows does NOT mean most of them
+    resolve to it — only a row whose own item is still young does.
+
+    Returns {sku_nbr: {"BULK": [physical_sku_nbr, ...], "PARCEL": [...]}}
+    for genuine conflicts only — the per-segment physical SKUs are what
+    /api/submit_cost_model turns into reconcilable rows for the user,
+    instead of just naming the resolved SKU_NBR and leaving them to
+    hunt down which upload rows are actually responsible."""
+    physical_to_segment = {
+        sku: seg for seg, skus in physical_skus_by_type.items() for sku in skus
+    }
+    rows = client.query(f"""
+        SELECT DISTINCT SKU_NBR, THD_SKU_NBR, SISTER_SKU_NBR
+        FROM {EVENTS_SKU_LIST}
+        WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+    """, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ])).result()
+
+    sku_nbr_segments = {}
+    for r in rows:
+        physical_sku = r.THD_SKU_NBR if r.THD_SKU_NBR is not None else r.SISTER_SKU_NBR
+        seg = physical_to_segment.get(physical_sku)
+        if seg is not None and r.SKU_NBR is not None:
+            sku_nbr_segments.setdefault(r.SKU_NBR, {}).setdefault(seg, set()).add(physical_sku)
+    return {
+        sku: {seg: sorted(skus) for seg, skus in segs.items()}
+        for sku, segs in sku_nbr_segments.items() if len(segs) > 1
+    }
+
+
+@app.route("/api/download_stock_type_classification")
+def download_stock_type_classification():
+    """Export this session's bulk/parcel classification as THD_KEY /
+    SHIPPING_CATEGORY (plus context columns), overrides already applied —
+    the same result set the Step 2 confirmation panel is showing."""
+    rows = _effective_stock_type_rows()
+    if not rows:
+        return jsonify({"error": "No bulk/parcel classification to download — run it in Step 2 first."}), 400
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bulk-Parcel Classification"
+
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+
+    columns = [
+        ("thd_key", "THD_KEY"),
+        ("stock_type", "SHIPPING_CATEGORY"),
+        ("thd_sku_nbr", "THD_SKU_NBR"),
+        ("sister_sku_nbr", "SISTER_SKU_NBR"),
+        ("sku_desc", "SKU_DESC"),
+        ("buy_units", "BUY_UNITS"),
+    ]
+    for c_idx, (_, header) in enumerate(columns, 1):
+        cell = ws.cell(row=1, column=c_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+        ws.column_dimensions[cell.column_letter].width = max(len(header) + 4, 12)
+
+    for r_idx, row in enumerate(rows, 2):
+        for c_idx, (key, _) in enumerate(columns, 1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=row.get(key))
+            cell.border = thin_border
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    event_name = _upload_cache.get("event_name", "")
+    safe_event = re.sub(r'[^A-Za-z0-9]+', '_', event_name) if event_name else "event"
+    return send_file(
+        buf, as_attachment=True,
+        download_name=f"shipping_category_{safe_event}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/api/cost_model_preview", methods=["POST"])
 def api_cost_model_preview():
     """Return SKU breakdown by sister flag for charts + table preview.
@@ -1526,10 +2210,39 @@ def _parse_dc_list(dc_list_str):
     return nbrs or None
 
 
+def _match_supplier_names(m):
+    """A vendor_matches entry normally speaks for exactly one supplier, but
+    the frontend collapses every supplier that fell back to the generic
+    OTHER strategy into a single entry (matchVendorStrategy in app.js) and
+    carries the full list of underlying supplier names on _otherSuppliers —
+    every one of those names still has to resolve to this entry's own
+    DC_LIST, not just its own SUPPLIER, or every fallback supplier past the
+    first would silently get no DC assignment at all."""
+    names = m.get("_otherSuppliers") or [m.get("SUPPLIER")]
+    return [n.strip() for n in names if n and n.strip()]
+
+
 # EVENTS_SKU_LIST stores wave data as W1_UNITS..W5_UNITS, not WAVE_1..WAVE_5 —
 # only relevant if _determine_thd_key ever has to fall back that far to
 # disambiguate rows (MVNDR_NBR alone covers the common case).
 _THD_KEY_COL_TO_EVENTS_SKU_LIST = {f"WAVE_{n}": f"W{n}_UNITS" for n in range(1, 6)}
+
+
+def _physical_sku_filter_sql_and_params(physical_skus):
+    """Shared WHERE-clause fragment + query params for restricting an
+    EVENTS_SKU_LIST query to one bulk/parcel segment's physical SKUs (see
+    the "physical_sku_nbr" grouping in /api/classify_stock_type). Matches on
+    COALESCE(THD_SKU_NBR, SISTER_SKU_NBR) — the exact same THD-preferred,
+    sister-as-last-resort rule the classification endpoint uses — so a
+    segment's SQL filter and its Python-side classification can never
+    disagree on which row belongs to it. Returns ("", []) when physical_skus
+    is None (the non-segmented, backward-compatible case: no extra filter)."""
+    if physical_skus is None:
+        return "", []
+    return (
+        " AND COALESCE(THD_SKU_NBR, SISTER_SKU_NBR) IN UNNEST(@physical_skus)",
+        [bigquery.ArrayQueryParameter("physical_skus", "INT64", physical_skus)],
+    )
 
 
 def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vendor_matches):
@@ -1548,13 +2261,17 @@ def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vend
     values) that /api/vendor_skus already builds as THD_KEY and that the
     frontend now uses as the SKU_OVERRIDES key — reconstructed here from a
     fresh EVENTS_SKU_LIST query using the exact same key_cols so the two
-    sides agree on which row is which."""
+    sides agree on which row is which.
+
+    Vendor-Aligned is always a whole-event strategy — never split by Bulk/
+    Parcel (see api_match_vendor_strategy) — so this always resolves over
+    every row in the event, with no segment filter."""
     default_dcs_by_supplier = {}
     overrides_by_key = {}
     for m in vendor_matches:
-        supplier = (m.get("SUPPLIER") or "").strip()
-        if supplier:
-            default_dcs_by_supplier[supplier] = _parse_dc_list(m.get("DC_LIST"))
+        dc_list = _parse_dc_list(m.get("DC_LIST"))
+        for supplier in _match_supplier_names(m):
+            default_dcs_by_supplier[supplier] = dc_list
         for thd_key, dcs in (m.get("SKU_OVERRIDES") or {}).items():
             try:
                 overrides_by_key[str(thd_key)] = sorted({int(d) for d in dcs})
@@ -1608,21 +2325,21 @@ def _compute_vendor_aligned_submission_rows(client, event_name, event_year, vend
     return out
 
 
-def _update_events_target_dc(client, event_name, event_year, vendor_matches):
-    """Writes each record's resolved target DC selection onto its own
-    EVENTS_SKU_LIST row, keyed by THD_KEY_ID (always unique) — unlike
-    DFC_COST_MODEL_SUBMISSION, which only carries a proxy SKU_NBR and can't
-    tell apart two records that legitimately share one (e.g. two THD keys
-    differing only by MVNDR_NBR, each with its own per-SKU override). Mirrors
-    _compute_vendor_aligned_submission_rows' own per-row override resolution,
-    just written at the ungrouped record grain instead of rolled up by
-    SKU_NBR."""
+def _resolve_target_dc_updates(client, event_name, event_year, vendor_matches):
+    """Resolves what TARGET_DC_COUNT/TARGET_DC_INCLUSIONS this vendor_matches
+    selection would assign to each of this event's EVENTS_SKU_LIST rows —
+    the shared computation behind _update_events_target_dc (which writes it)
+    and _vendor_selection_matches_existing (which only compares it against
+    what's already stored, to check whether a resubmit would be a no-op).
+    Returns (rows, thd_key_ids, target_counts, target_inclusions); rows also
+    carries each row's currently-stored TARGET_DC_COUNT/TARGET_DC_INCLUSIONS
+    for that comparison. Empty lists when this event has no rows yet."""
     default_dcs_by_supplier = {}
     overrides_by_key = {}
     for m in vendor_matches:
-        supplier = (m.get("SUPPLIER") or "").strip()
-        if supplier:
-            default_dcs_by_supplier[supplier] = _parse_dc_list(m.get("DC_LIST"))
+        dc_list = _parse_dc_list(m.get("DC_LIST"))
+        for supplier in _match_supplier_names(m):
+            default_dcs_by_supplier[supplier] = dc_list
         for thd_key, dcs in (m.get("SKU_OVERRIDES") or {}).items():
             try:
                 overrides_by_key[str(thd_key)] = sorted({int(d) for d in dcs})
@@ -1636,7 +2353,8 @@ def _update_events_target_dc(client, event_name, event_year, vendor_matches):
     sql_cols = [f"{_THD_KEY_COL_TO_EVENTS_SKU_LIST.get(c, c)} AS {c}" for c in extra_key_cols]
 
     rows = list(client.query(f"""
-        SELECT THD_KEY_ID, SKU_NBR, SUPPLIER, BUY_UNITS{"".join(f", {c}" for c in sql_cols)}
+        SELECT THD_KEY_ID, SKU_NBR, SUPPLIER, BUY_UNITS, TARGET_DC_COUNT, TARGET_DC_INCLUSIONS
+               {"".join(f", {c}" for c in sql_cols)}
         FROM {EVENTS_SKU_LIST}
         WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
     """, job_config=bigquery.QueryJobConfig(query_parameters=[
@@ -1644,7 +2362,7 @@ def _update_events_target_dc(client, event_name, event_year, vendor_matches):
         bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
     ])).result())
     if not rows:
-        return 0
+        return [], [], [], []
 
     thd_key_ids, target_counts, target_inclusions = [], [], []
     for r in rows:
@@ -1653,6 +2371,22 @@ def _update_events_target_dc(client, event_name, event_year, vendor_matches):
         thd_key_ids.append(r.THD_KEY_ID)
         target_counts.append(len(dc_list) if dc_list else None)
         target_inclusions.append(", ".join(str(d) for d in dc_list) if dc_list else None)
+    return rows, thd_key_ids, target_counts, target_inclusions
+
+
+def _update_events_target_dc(client, event_name, event_year, vendor_matches):
+    """Writes each record's resolved target DC selection onto its own
+    EVENTS_SKU_LIST row, keyed by THD_KEY_ID (always unique) — unlike
+    DFC_COST_MODEL_SUBMISSION, which only carries a proxy SKU_NBR and can't
+    tell apart two records that legitimately share one (e.g. two THD keys
+    differing only by MVNDR_NBR, each with its own per-SKU override). Mirrors
+    _compute_vendor_aligned_submission_rows' own per-row override resolution,
+    just written at the ungrouped record grain instead of rolled up by
+    SKU_NBR."""
+    rows, thd_key_ids, target_counts, target_inclusions = _resolve_target_dc_updates(
+        client, event_name, event_year, vendor_matches)
+    if not rows:
+        return 0
 
     merge_sql = f"""
         MERGE {EVENTS_SKU_LIST} T
@@ -1703,6 +2437,132 @@ def _update_events_campus_pairs(client, event_name, event_year, campus_pairs):
     return job.num_dml_affected_rows or 0
 
 
+def _compute_dc_selection_submission_rows(client, event_name, event_year, dc_counts, dc_inclusions,
+                                           dc_exclusions, physical_skus=None):
+    """DC Selection's equivalent of _compute_vendor_aligned_submission_rows:
+    one row per resolved SKU_NBR (summed BUY_UNITS), all sharing the SAME
+    target_dc_count/dc_inclusions/dc_exclusions — DC Selection has no
+    per-vendor resolution, just Step 2's one event-wide (or, with the
+    Bulk/Parcel split, one per-segment) DC filter/count choice. Used instead
+    of the old direct INSERT...SELECT...GROUP BY so its rows can be combined
+    with a Vendor-Aligned segment's rows into a single submission when a
+    split is active. physical_skus restricts this to one segment; None
+    (default) is every row in the event, matching the original behavior."""
+    target_dc_count_str = ",".join(str(d) for d in sorted(dc_counts)) if dc_counts else None
+    dc_inclusions_str = ", ".join(str(d) for d in dc_inclusions) if dc_inclusions else None
+    dc_exclusions_str = ", ".join(str(d) for d in dc_exclusions) if dc_exclusions else None
+
+    filter_sql, filter_params = _physical_sku_filter_sql_and_params(physical_skus)
+    rows = client.query(f"""
+        SELECT SAFE_CAST(SKU_NBR AS STRING) AS sku_nbr, CAST(SUM(BUY_UNITS) AS STRING) AS buy_qty
+        FROM {EVENTS_SKU_LIST}
+        WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year{filter_sql}
+        GROUP BY SKU_NBR
+    """, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ] + filter_params)).result()
+
+    return [
+        {
+            "sku_nbr": r.sku_nbr,
+            "buy_qty": r.buy_qty,
+            "target_dc_count": target_dc_count_str,
+            "dc_inclusions": dc_inclusions_str,
+            "dc_exclusions": dc_exclusions_str,
+        }
+        for r in rows
+    ]
+
+
+def _update_events_target_dc_for_dc_selection(client, event_name, event_year, dc_counts, dc_inclusions,
+                                               physical_skus):
+    """DC Selection's equivalent of _update_events_target_dc: writes the SAME
+    target_dc_count/dc_inclusions onto every EVENTS_SKU_LIST row in this
+    segment (a plain UPDATE, not a per-row MERGE, since every row in a DC
+    Selection segment gets an identical value — there is no per-vendor/
+    per-SKU resolution here). Only ever called for a Bulk/Parcel split
+    submission; plain (non-split) DC Selection still leaves these columns
+    null, exactly as before this feature existed, since nothing downstream
+    reads them for that path yet."""
+    target_dc_count_str = ",".join(str(d) for d in sorted(dc_counts)) if dc_counts else None
+    dc_inclusions_str = ", ".join(str(d) for d in dc_inclusions) if dc_inclusions else None
+
+    filter_sql, filter_params = _physical_sku_filter_sql_and_params(physical_skus)
+    update_sql = f"""
+        UPDATE {EVENTS_SKU_LIST}
+        SET TARGET_DC_COUNT = @target_dc_count, TARGET_DC_INCLUSIONS = @dc_inclusions
+        WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year{filter_sql}
+    """
+    update_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("target_dc_count", "STRING", target_dc_count_str),
+        bigquery.ScalarQueryParameter("dc_inclusions", "STRING", dc_inclusions_str),
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ] + filter_params)
+    job = client.query(update_sql, job_config=update_config)
+    job.result()
+    return job.num_dml_affected_rows or 0
+
+
+def _vendor_selection_matches_existing(client, event_name, event_year, vendor_matches):
+    """Whether this vendor_matches selection resolves to the same
+    TARGET_DC_COUNT/TARGET_DC_INCLUSIONS already stored on every one of this
+    event's EVENTS_SKU_LIST rows — reuses _resolve_target_dc_updates' own
+    resolution instead of re-deriving it, so this can never drift from what
+    _update_events_target_dc would actually write."""
+    rows, _, target_counts, target_inclusions = _resolve_target_dc_updates(
+        client, event_name, event_year, vendor_matches)
+    if not rows:
+        return True  # nothing on file yet to disagree with
+    return all(
+        r.TARGET_DC_COUNT == new_count and (r.TARGET_DC_INCLUSIONS or None) == (new_incl or None)
+        for r, new_count, new_incl in zip(rows, target_counts, target_inclusions)
+    )
+
+
+def _campus_pairs_match_existing(client, event_name, event_year, campus_pairs):
+    """Whether this DC Selection's "Treat Bulk Counterparts The Same" choice
+    matches what's already stored on this event's EVENTS_SKU_LIST rows (an
+    event-wide flag — see _update_events_campus_pairs — so any row settles
+    the comparison)."""
+    rows = list(client.query(f"""
+        SELECT DISTINCT PERRIS_CAMPUS_MERGED, LG_CAMPUS_MERGED
+        FROM {EVENTS_SKU_LIST}
+        WHERE EVENT_NAME = @event_name AND EVENT_YEAR = @event_year
+    """, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
+        bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+    ])).result())
+    if not rows:
+        return True
+    perris_wanted = "perris" in campus_pairs
+    lg_wanted = "locust_grove" in campus_pairs
+    return all(bool(r.PERRIS_CAMPUS_MERGED) == perris_wanted and bool(r.LG_CAMPUS_MERGED) == lg_wanted for r in rows)
+
+
+def _dc_filter_matches_existing(client, key, dc_inclusions, dc_exclusions):
+    """Whether DC Selection's event-wide Include/Exclude filter matches what
+    was already submitted to DFC_COST_MODEL_SUBMISSION under this same `key`
+    — the same comma-joined string format api_submit_cost_model itself
+    writes, so this can't disagree with what a real resubmit would produce."""
+    rows = list(client.query(f"""
+        SELECT DISTINCT dc_inclusions, dc_exclusions
+        FROM {DFC_COST_MODEL_SUBMISSION}
+        WHERE `key` = @key
+    """, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("key", "STRING", key),
+    ])).result())
+    if not rows:
+        return True  # nothing submitted yet to disagree with
+    wanted_incl = ", ".join(str(d) for d in dc_inclusions) if dc_inclusions else None
+    wanted_excl = ", ".join(str(d) for d in dc_exclusions) if dc_exclusions else None
+    return all(
+        (r.dc_inclusions or None) == wanted_incl and (r.dc_exclusions or None) == wanted_excl
+        for r in rows
+    )
+
+
 @app.route("/api/download_vendor_aligned_table", methods=["POST"])
 def download_vendor_aligned_table():
     """Export every SKU record across all matched suppliers with its
@@ -1746,9 +2606,9 @@ def download_vendor_aligned_table():
         default_dcs_by_supplier = {}
         overrides_by_key = {}
         for m in vendor_matches:
-            supplier = (m.get("SUPPLIER") or "").strip()
-            if supplier:
-                default_dcs_by_supplier[supplier] = _parse_dc_list(m.get("DC_LIST"))
+            dc_list_for_supplier = _parse_dc_list(m.get("DC_LIST"))
+            for supplier in _match_supplier_names(m):
+                default_dcs_by_supplier[supplier] = dc_list_for_supplier
             for thd_key, dcs in (m.get("SKU_OVERRIDES") or {}).items():
                 try:
                     overrides_by_key[str(thd_key)] = sorted({int(d) for d in dcs})
@@ -1805,14 +2665,29 @@ def api_submit_cost_model():
     """Insert per-SKU rows into DFC_COST_MODEL_SUBMISSION from EVENTS_SKU_LIST.
     When vendor_matches (Step 2's resolved vendor-aligned DC assignments) are
     supplied, target_dc_count/dc_inclusions/dc_exclusions are populated from
-    them instead of left null."""
+    them instead of left null.
+
+    When `segments` is supplied instead (the Bulk/Parcel strategy split —
+    see /api/classify_stock_type), each segment is
+    {stock_type: "BULK"|"PARCEL", dc_counts, dc_inclusions, dc_exclusions,
+    campus_pairs} — the split only ever applies to DC Selection, since a
+    vendor's DC assignment is driven by who the supplier is, not by whether
+    their SKUs ship bulk or parcel. Every segment is resolved against only
+    its own physical SKUs (_physical_skus_by_stock_type), but all of them
+    land in ONE INSERT under this event's single `key` — DFC_COST_MODEL_
+    SUBMISSION allows only one submission per event, so segments are
+    combined rather than submitted independently."""
     body = request.get_json(silent=True) or {}
     event_name = body.get("event_name", "")
+    segments = body.get("segments") or []
     vendor_matches = body.get("vendor_matches") or []
     # DC Selection (Single-DC/Multi-DC Count) has no per-vendor DC resolution
-    # the way vendor_matches does — these are simply the event-wide Include/
-    # Exclude choices from Step 2's DC filter, applied identically to every
-    # SKU row. target_dc_count is left null for this strategy for now.
+    # the way vendor_matches does — these are simply the event-wide DC
+    # count(s)/Include/Exclude choices from Step 2, applied identically to
+    # every SKU row. The actual per-SKU DC count a Multi-DC Count selection
+    # resolves to isn't known until "Determine Assortment IDs" runs (Step 6),
+    # so this is Step 2's raw selection, not that later per-SKU resolution.
+    dc_counts = body.get("dc_counts") or []
     dc_inclusions = body.get("dc_inclusions") or []
     dc_exclusions = body.get("dc_exclusions") or []
     # DC Selection's "Treat Bulk Counterparts The Same" choice — only
@@ -1820,11 +2695,29 @@ def api_submit_cost_model():
     # instead), so only acted on in the vendor_matches-less branch below.
     campus_pairs = body.get("campus_pairs") or []
     logger.info(
-        f"submit_cost_model: event_name={event_name!r} vendor_matches_count={len(vendor_matches)} "
-        f"dc_inclusions={dc_inclusions} dc_exclusions={dc_exclusions}"
+        f"submit_cost_model: event_name={event_name!r} segments_count={len(segments)} "
+        f"vendor_matches_count={len(vendor_matches)} "
+        f"dc_counts={dc_counts} dc_inclusions={dc_inclusions} dc_exclusions={dc_exclusions}"
     )
     if not event_name:
         return jsonify({"error": "event_name is required"}), 400
+
+    if segments:
+        # PERRIS_CAMPUS_MERGED/LG_CAMPUS_MERGED are event-wide columns (see
+        # _update_events_campus_pairs) — there is no per-row/per-segment
+        # variant of them. Rather than silently pick one segment's choice or
+        # OR them together (which could misrepresent a segment that never
+        # asked for merging), require every DC Selection segment that
+        # specifies one to agree.
+        dc_selection_campus_choices = {
+            tuple(sorted(seg.get("campus_pairs") or []))
+            for seg in segments if not (seg.get("vendor_matches") or [])
+        }
+        if len(dc_selection_campus_choices) > 1:
+            return jsonify({
+                "error": "Bulk and Parcel chose different \"Treat Bulk Counterparts The Same\" settings. "
+                         "That choice is event-wide, not per segment — set it the same way in both tabs."
+            }), 400
 
     try:
         # Derive event_year from EVENTS_SKU_LIST
@@ -1863,10 +2756,59 @@ def api_submit_cost_model():
             bigquery.ScalarQueryParameter("email", "STRING", email),
         ]
 
-        if vendor_matches:
+        if segments:
+            physical_skus_by_type = _physical_skus_by_stock_type()
+
+            # Narrow, accurate safety net (see _find_cross_segment_sku_conflicts):
+            # only fires when a row's ACTUAL resolved SKU_NBR — decided by
+            # BigQuery's maturity comparison at insert time, not knowable
+            # pre-insert — genuinely lands in both segments. Almost always
+            # empty; when it isn't, DFC_COST_MODEL_SUBMISSION has no way to
+            # represent two different target_dc_count values for one SKU_NBR,
+            # so this has to block rather than silently pick one.
+            conflicts = _find_cross_segment_sku_conflicts(bq(), event_name, event_year, physical_skus_by_type)
+            if conflicts:
+                # Give the user something to act on directly instead of just
+                # naming the resolved SKU_NBR: the actual upload rows behind
+                # each side of the conflict, in the same shape the Step 2
+                # confirmation panel already knows how to render Bulk/Parcel
+                # override buttons for (see renderStockTypeMissingTable) — so
+                # this reuses that exact UI and /api/override_stock_type,
+                # rather than sending the user hunting for the right row.
+                physical_sku_to_conflict_sku_nbr = {
+                    physical_sku: sku_nbr
+                    for sku_nbr, segs in conflicts.items()
+                    for physical_skus in segs.values()
+                    for physical_sku in physical_skus
+                }
+                conflict_rows = [
+                    {**row, "conflict_sku_nbr": physical_sku_to_conflict_sku_nbr[row["physical_sku_nbr"]]}
+                    for row in _effective_stock_type_rows()
+                    if row["physical_sku_nbr"] in physical_sku_to_conflict_sku_nbr
+                ]
+                return jsonify({
+                    "error": "Some SKUs resolved to the same SKU_NBR in both Bulk and Parcel after BigQuery's "
+                             "own maturity check — pick one category for each flagged row below and resubmit.",
+                    "conflicts": conflict_rows,
+                }), 409
+
+            computed_rows = []
+            for seg in segments:
+                seg_physical_skus = physical_skus_by_type.get(seg.get("stock_type"), [])
+                if not seg_physical_skus:
+                    continue  # nothing classified into this segment — nothing to submit for it
+                computed_rows.extend(_compute_dc_selection_submission_rows(
+                    bq(), event_name, event_year, seg.get("dc_counts") or [],
+                    seg.get("dc_inclusions") or [], seg.get("dc_exclusions") or [],
+                    physical_skus=seg_physical_skus))
+            if not computed_rows:
+                return jsonify({"error": f"No rows found for event '{event_name}'"}), 400
+        elif vendor_matches:
             computed_rows = _compute_vendor_aligned_submission_rows(bq(), event_name, event_year, vendor_matches)
             if not computed_rows:
                 return jsonify({"error": f"No rows found for event '{event_name}'"}), 400
+
+        if segments or vendor_matches:
             struct_rows = [
                 bigquery.StructQueryParameter(
                     None,
@@ -1897,9 +2839,9 @@ def api_submit_cost_model():
             ])
         else:
             # DC Selection: no per-SKU DC resolution to draw on, so every row
-            # gets the same event-wide dc_inclusions/dc_exclusions the user set
-            # in Step 2's DC filter (None if they left it unset — same as the
-            # prior always-null behavior).
+            # gets the same event-wide target_dc_count/dc_inclusions/
+            # dc_exclusions the user set in Step 2 (None if left unset).
+            target_dc_count_str = ",".join(str(d) for d in sorted(dc_counts)) if dc_counts else None
             dc_inclusions_str = ", ".join(str(d) for d in dc_inclusions) if dc_inclusions else None
             dc_exclusions_str = ", ".join(str(d) for d in dc_exclusions) if dc_exclusions else None
             submission_sql = f"""
@@ -1914,7 +2856,7 @@ def api_submit_cost_model():
                   SAFE_CAST(SKU_NBR AS STRING) AS sku_nbr,
                   CAST(SUM(BUY_UNITS) AS STRING) AS buy_qty,
                   @email AS email,
-                  CAST(NULL AS STRING) AS target_dc_count,
+                  @target_dc_count AS target_dc_count,
                   @dc_inclusions AS dc_inclusions,
                   @dc_exclusions AS dc_exclusions
                 FROM {EVENTS_SKU_LIST}
@@ -1924,6 +2866,7 @@ def api_submit_cost_model():
             sub_config = bigquery.QueryJobConfig(query_parameters=base_params + [
                 bigquery.ScalarQueryParameter("event_name", "STRING", event_name),
                 bigquery.ScalarQueryParameter("event_year", "INT64", event_year),
+                bigquery.ScalarQueryParameter("target_dc_count", "STRING", target_dc_count_str),
                 bigquery.ScalarQueryParameter("dc_inclusions", "STRING", dc_inclusions_str),
                 bigquery.ScalarQueryParameter("dc_exclusions", "STRING", dc_exclusions_str),
             ])
@@ -1933,7 +2876,25 @@ def api_submit_cost_model():
         rows_inserted = job.num_dml_affected_rows or 0
         logger.info(f"Inserted {rows_inserted} rows into DFC_COST_MODEL_SUBMISSION")
 
-        if vendor_matches:
+        if segments:
+            physical_skus_by_type = _physical_skus_by_stock_type()
+            agreed_campus_pairs = None
+            for seg in segments:
+                seg_physical_skus = physical_skus_by_type.get(seg.get("stock_type"), [])
+                if not seg_physical_skus:
+                    continue
+                updated = _update_events_target_dc_for_dc_selection(
+                    bq(), event_name, event_year, seg.get("dc_counts") or [],
+                    seg.get("dc_inclusions") or [], physical_skus=seg_physical_skus)
+                agreed_campus_pairs = seg.get("campus_pairs") or []
+                logger.info(f"Updated TARGET_DC_COUNT/TARGET_DC_INCLUSIONS on {updated} EVENTS_SKU_LIST rows for segment {seg.get('stock_type')}")
+            # Validated above (dc_selection_campus_choices) to be the same
+            # across every DC Selection segment, so any one of them speaks
+            # for the whole event.
+            if agreed_campus_pairs is not None:
+                updated = _update_events_campus_pairs(bq(), event_name, event_year, agreed_campus_pairs)
+                logger.info(f"Updated PERRIS_CAMPUS_MERGED/LG_CAMPUS_MERGED on {updated} EVENTS_SKU_LIST rows")
+        elif vendor_matches:
             # DFC_COST_MODEL_SUBMISSION only carries a proxy SKU_NBR, which can't
             # disambiguate two records that legitimately share one (different
             # MVNDR_NBR, different per-SKU override) — so also write each record's
@@ -2175,6 +3136,60 @@ def _resolve_sku_grp(run_id: str, event_name: str, default=None):
         return default
 
 
+def _resolve_run_id_from_event(event_name: str, event_year):
+    """The reverse lookup of _resolve_sku_grp: given only event_name/event_year
+    (known from Step 1, before any Run ID exists on screen), finds whichever
+    catalog run already priced this event and returns its (RUN_ID, SKU_GRP).
+
+    One RUN_ID batches many events' SKU_GRPs together (a single weekly
+    "Automatic SKU Run" catalog run prices dozens of unrelated submissions in
+    one go — confirmed live: RUN_ID f6da6ade... carried both "...-2028
+    PATIO-2028 PATIO" and "...-2027 HALLOWEEN-2027 HALLOWEEN"), so a RUN_ID
+    can never be resolved on its own and then paired with a SKU_GRP fetched
+    separately — that risks stitching together a RUN_ID and a SKU_GRP that
+    happen to coexist in the table but were never actually the same row's
+    pricing. Both columns are always read off the SAME matched row here.
+
+    api_submit_cost_model builds SKU_GRP's source `key` as
+    f"{ldap_user}-{project_name}-{project_name}" where
+    project_name = f"{event_year} {event_name}" — confirmed against a real
+    row: key "Q7G2STK-2028 PATIO-2028 PATIO" for event_year=2028,
+    event_name="PATIO". So SKU_GRP always ends with project_name doubled
+    back-to-back (punctuation stripped away here, since the real string
+    has a "-" joining them) — matching on that doubled suffix is exact
+    enough to not need the ldap_user prefix at all (whoever actually
+    submitted it), and far more specific than a plain "contains event_name"
+    substring check, which would blur PATIO 2027 into PATIO 2028 or match
+    an unrelated project name that happens to contain the same word.
+
+    Picks the most recently run match (by RUN_DATE) when more than one
+    catalog run has priced this same event/year. Returns (None, None) if
+    nothing has priced this event yet."""
+    if not event_name or not event_year:
+        return None, None
+    try:
+        stripped_project_name = re.sub(r"[^A-Za-z0-9]", "", f"{event_year} {event_name}").upper()
+        doubled_suffix = stripped_project_name + stripped_project_name
+        query = f"""
+            SELECT RUN_ID, SKU_GRP
+            FROM {CATALOG_RUN_ANALYTICS}
+            WHERE REGEXP_REPLACE(UPPER(SKU_GRP), r'[^A-Z0-9]', '')
+                  LIKE CONCAT('%', @doubled_suffix)
+            ORDER BY RUN_DATE DESC
+            LIMIT 1
+        """
+        job_config = bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ScalarQueryParameter("doubled_suffix", "STRING", doubled_suffix),
+        ])
+        rows = list(bq().query(query, job_config=job_config).result())
+        if not rows:
+            return None, None
+        return str(rows[0].RUN_ID), rows[0].SKU_GRP
+    except Exception:
+        logger.exception(f"Failed to resolve run_id for event_name={event_name} event_year={event_year}")
+        return None, None
+
+
 # ── Section 5: Assortment ID Determination ──────────────────────────
 
 def _normalize_strategy(body: dict) -> str:
@@ -2251,6 +3266,7 @@ def api_determine_assortment_start():
             # No run_id supplied — nothing submitted, existing results already
             # sit in the output tables, so just fetch them now.
             payload = fetch_multi_dc_results(bq())
+            persist_dynamic_multi_dc_selection(bq())
             return jsonify({"job_id": None, "sync_result": payload, "error": None})
         return jsonify(started)
 
@@ -2281,6 +3297,12 @@ def api_determine_assortment_status():
         return jsonify({"done": True, "error": message})
 
     payload = fetch_multi_dc_results(client)
+    # Persist this run's per-record decision onto EVENTS_SKU_LIST itself right
+    # away — see persist_dynamic_multi_dc_selection's docstring for why: the
+    # scratch table this just read from is shared across every event/session
+    # and gets replaced by the next determine call anywhere, so allocation
+    # must never depend on it still holding this run's answer later.
+    persist_dynamic_multi_dc_selection(client)
     return jsonify({"done": True, "sync_result": payload, "error": None})
 
 
@@ -2337,6 +3359,80 @@ def api_check_dc_eligibility():
     except Exception as e:
         logger.exception("DC eligibility check error")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/check_dc_selection_eligibility", methods=["POST"])
+def api_check_dc_selection_eligibility():
+    """DC_SELECTION (i.e. MULTI_DC/SINGLE_DC via explicit dc_counts, NOT
+    VENDOR_ALIGNED): a preview available on Step 3 before running the full
+    assortment tool — which target SKUs would fail to price at every one of
+    the caller's own dc_counts/dc_inclusions/dc_exclusions/campus-merge
+    choice. This is the strategy-correct counterpart to
+    /api/check_dc_eligibility above — that one is VENDOR_ALIGNED-only and has
+    no notion of dc_counts or campus merging at all, which is why it was
+    reporting the wrong wholesale "109 SKUs ineligible" instead of the real,
+    much smaller per-DC breakdown."""
+    body = request.get_json(silent=True) or {}
+    run_id = body.get("run_id", "")
+    event_name = body.get("event_name", "")
+    if not run_id or not event_name:
+        return jsonify({"error": "run_id and event_name are required"}), 400
+    sku_grp = _resolve_sku_grp(run_id, event_name, default=body.get("sku_grp", ""))
+    dc_counts = body.get("dc_counts") or []
+    dc_inclusions = body.get("dc_inclusions") or []
+    dc_exclusions = body.get("dc_exclusions") or []
+    campus_pairs = body.get("campus_pairs") or []
+    if not dc_counts:
+        return jsonify({"error": "At least one DC count is required for this preview"}), 400
+    try:
+        problem_skus = check_dc_selection_eligibility(
+            bq(), run_id, sku_grp, event_name, dc_counts, dc_inclusions, dc_exclusions, campus_pairs
+        )
+        return jsonify({"problem_skus": problem_skus})
+    except Exception as e:
+        logger.exception("DC selection eligibility check error")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/check_problem_skus", methods=["POST"])
+def api_check_problem_skus():
+    """MULTI_DC only: flags SKUs the winning (or campus-merged) assortment at
+    a factory's own chosen tier still didn't price — surfaced on the
+    Assortment ID Results step so the user can give a problem SKU its own DC
+    selection instead of it just staying unpriced."""
+    body = request.get_json(silent=True) or {}
+    event_name = body.get("event_name", "")
+    run_id = body.get("run_id", "")
+    if not event_name:
+        return jsonify({"error": "event_name is required"}), 400
+    try:
+        problem_skus = check_ladder_problem_skus(bq(), run_id, event_name)
+        return jsonify({"problem_skus": problem_skus})
+    except Exception as e:
+        logger.exception("Problem SKU check error")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/resolve_problem_sku", methods=["POST"])
+def api_resolve_problem_sku():
+    """MULTI_DC only: reroute one flagged SKU_NBR to its own independent
+    assortment given a user-picked DC inclusion/exclusion, without rerunning
+    the shared ladder — see resolve_problem_sku_override."""
+    body = request.get_json(silent=True) or {}
+    run_id = body.get("run_id", "")
+    event_name = body.get("event_name", "")
+    sku_nbr = body.get("sku_nbr")
+    if not run_id or not event_name or sku_nbr is None:
+        return jsonify({"error": "run_id, event_name, and sku_nbr are required"}), 400
+    sku_grp = _resolve_sku_grp(run_id, event_name, default=body.get("sku_grp", ""))
+    dc_inclusions = body.get("dc_inclusions") or []
+    dc_exclusions = body.get("dc_exclusions") or []
+    result = apply_problem_sku_fix(
+        bq(), run_id, sku_grp, event_name, int(sku_nbr), dc_inclusions, dc_exclusions
+    )
+    if not result.get("success"):
+        return jsonify(result), 500
+    return jsonify(result)
 
 
 @app.route("/api/run_allocation", methods=["POST"])

@@ -238,14 +238,21 @@ def fetch_lowest_expense_dc_count(client: bigquery.Client, run_id: str, sku_grp:
     alongside its own DC_LIST as a "-"-joined string of the real DC numbers —
     filtering there is a superset match (every requested DC must appear in the
     candidate's DC_LIST; the candidate may include additional DCs up to
-    dc_count), not an exact-match requirement."""
-    dc_count_filter = "AND g.DC_COUNT IN UNNEST(@dc_counts)" if dc_counts else ""
+    dc_count), not an exact-match requirement.
+
+    dc_counts=None (the true "auto-determine" case, no candidate set supplied
+    by the caller) defaults to 1-13, not an unrestricted search — 13 is always
+    the real ceiling (a campus pair is one interchangeable slot, never two
+    simultaneous physical DCs), and OBC_V_CTLG_RUN_BY_GROUP's own DC_COUNT
+    values run past that (observed up to 16), which would otherwise let this
+    pick a physically-impossible width."""
+    effective_dc_counts = [int(d) for d in dc_counts] if dc_counts else list(range(1, 14))
+    dc_count_filter = "AND g.DC_COUNT IN UNNEST(@dc_counts)"
     params = [
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
         bigquery.ScalarQueryParameter("sku_grp", "STRING", sku_grp),
+        bigquery.ArrayQueryParameter("dc_counts", "INT64", effective_dc_counts),
     ]
-    if dc_counts:
-        params.append(bigquery.ArrayQueryParameter("dc_counts", "INT64", [int(d) for d in dc_counts]))
 
     if dc_inclusions:
         params.append(bigquery.ArrayQueryParameter("dc_inclusions", "STRING", [str(int(d)) for d in dc_inclusions]))

@@ -69,11 +69,15 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
                     used.add(int(float(str(v).strip())))
                 except (ValueError, TypeError):
                     pass
+        # Proxies count up one at a time (10000, 10001, 10002, ...) rather than
+        # jumping by 10000, so they stay real-looking 5-digit MVNDR_NBR values
+        # for as long as possible (up to 90000 blanks) instead of overflowing
+        # to 6 digits after just the 10th one.
         next_proxy = 10000
         for idx, val in df["MVNDR_NBR"].items():
             if pd.isna(val) or str(val).strip() == "":
                 while next_proxy in used:
-                    next_proxy += 10000
+                    next_proxy += 1
                 used.add(next_proxy)
                 df.at[idx, "MVNDR_NBR"] = str(next_proxy)
                 mvndr_warnings.append({
@@ -81,7 +85,7 @@ def validate_upload(df: pd.DataFrame, includes_imports: bool = False,
                     "row_data": {c: str(df.at[idx, c]) if pd.notna(df.at[idx, c]) else "" for c in df.columns},
                     "message": f"MVNDR_NBR was blank — filled with proxy value {next_proxy}",
                 })
-                next_proxy += 10000
+                next_proxy += 1
     checks.append({
         "id": "1b",
         "name": "MVNDR_NBR proxy-filled where blank",

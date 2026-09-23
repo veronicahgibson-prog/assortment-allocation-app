@@ -14,6 +14,10 @@
     let userEmail = "";
     let includesImports = false;
     let multiDcDynamicSelected = false;
+    // "No" -> "Single DC Count — determine for me": runs the group-run query
+    // with no DC-count constraint (open search), for either strategy — unlike
+    // multiDcDynamicSelected's cascading tiers, which stay import-only.
+    let singleDcCountAutoSelected = false;
     let singleDcGroupChoice = null; // {dc_count, camp_asmt_id, camp_list, total_exp} once auto-picked
     let waveCount = 0;
     let selectedStrategy = "";
@@ -22,25 +26,71 @@
     // Step 2's own Next click (DC Selection, which has no separate confirm
     // step), never automatically at upload time. Reset on every new upload.
     let dataInserted = false;
+    // Set by doInsert() when /api/check_upload_unchanged determined a
+    // "replace" would be a genuine no-op (same row data AND same DC/vendor
+    // selection already on file) — its callers (confirmVendorStrategy,
+    // setupInsert's DC Selection branch) read and consume this to skip their
+    // own submitCostModel() call too, instead of redoing that BigQuery work
+    // for a resubmit that changes nothing. Always reset to false once read.
+    let skipResubmitBecauseUnchanged = false;
+    // Bulk vs. Parcel strategy split (opt-in, see stockTypeSplitToggle).
+    // stockTypeRows: last /api/classify_stock_type response's per-row results.
+    // stockTypeOverrides: thd_key -> "BULK"/"PARCEL", mirrors the server's
+    // _upload_cache["stock_type_overrides"] so the UI never has to re-fetch
+    // just to know what a user already flipped.
+    let stockTypeSplitEnabled = false;
+    let stockTypeConfirmed = false;
+    let stockTypeRows = [];
+    let stockTypeOverrides = {};
+    // Per-segment strategy configuration, captured off the shared strategy
+    // controls when the user switches segment tabs (see setupSegmentTabs).
+    // null = that segment hasn't been configured yet this session. Shape:
+    // {strategy: "VENDOR_ALIGNED", vendorMatches, vendorStrategyConfirmed}
+    // or {strategy: "DC_SELECTION", dcCounts, dcInclusions, dcExclusions, campusPairs}.
+    // NOTE: only the "manual DC count" path is supported per segment — the
+    // "determine for me" single/multi-DC dynamic modes are not captured
+    // per-segment and should be treated as out of scope for a split event.
+    let segmentConfigs = { BULK: null, PARCEL: null };
+    let currentSegment = "BULK";
+    // Mirrors dcSelectionCostModelSubmitted, for the combined segmented
+    // submission (see setupInsert's stockTypeSplitEnabled branch).
+    let segmentedCostModelSubmitted = false;
+    // Whether the currently-displayed upload actually passed validation —
+    // tracked separately from #btnGoInsert's disabled attribute so the Next
+    // button's enabled state can always be recomputed from real state instead
+    // of snapshotting/restoring a raw disabled flag.
+    let uploadValidated = false;
+    // "event_name|event_year|includes_imports" (Step 1's fields, at the moment
+    // a file last passed validation) — lets a later prior-year check for a
+    // *different* combination detect that Step 2's upload is now stale for
+    // whatever's selected in Step 1, so it can be cleared instead of lingering
+    // as if it belonged to the newly selected event. Null once cleared or
+    // before any file has been uploaded.
+    let lastUploadEventKey = null;
     // The most recent successful /api/prior_year_strategy lookup from Step 1
     // (null if none found yet, or the last check came back empty) — Step 2
     // reads this to offer "Follow last year's strategy?".
     let lastPriorYearStrategy = null;
+    // Background auto-check for a prior-year strategy match (see
+    // scheduleAutoPriorYearCheck/autoCheckPriorYearIfReady in
+    // setupPriorYearStrategy): the debounce timer handle, the last
+    // "name|year|isImportVal" combo already checked (so switching back to
+    // one already looked up doesn't re-fetch it), and whether a check is
+    // currently in flight — read by goStep so arriving at Step 2 mid-check
+    // doesn't just show an empty "Follow last year's strategy?" box forever.
+    let autoPriorYearCheckTimer = null;
+    let autoPriorYearCheckedFor = null;
+    let priorYearCheckInFlight = false;
     // Which lastPriorYearStrategy object (by reference) has already had its
     // "Follow last year's strategy?" default applied — lets a fresh lookup
     // default to checked without re-checking a box the user just unchecked
     // for that same lookup.
     let followLastYearAppliedFor = null;
-    // "name|year|isImport" key of the last combination auto-checked for a
-    // prior-year match on arrival at Step 2 — avoids re-fetching every time
-    // the user revisits Step 2 with the same Step 1 inputs. Set by
-    // triggerAutoPriorYearCheck (assigned in setupPriorYearStrategy).
-    let autoPriorYearCheckedFor = null;
-    let triggerAutoPriorYearCheck = null;
-    // True while triggerAutoPriorYearCheck's lookup is in flight — Next is
-    // blocked during this window so the user can't proceed a beat before
-    // the prior-year strategy (e.g. Vendor-Aligned) actually gets selected.
-    let priorYearCheckInFlight = false;
+    // True only while applyLastYearStrategy() is itself programmatically
+    // flipping radios/buttons to lay down last year's config — lets
+    // noteManualStrategyEdit() tell that apart from a real user click on the
+    // same controls, which it must not stay silent for.
+    let applyingLastYearStrategy = false;
     let assortmentResults = [];
     let resultsPage = 1;
     let resultsSort = "SKU_NBR";
@@ -151,6 +201,30 @@
         }
     }
 
+    // Fills in Run ID (and, in the same round trip, SKU Group) from just
+    // Event Name/Year — both already known from Step 1 — instead of making
+    // the user go find and paste in a Run ID by hand before Step 3 can do
+    // anything. Only meaningful once some catalog run has actually priced
+    // this event (e.g. it's been submitted to DFC Cost Model and the
+    // pipeline has caught up); silently does nothing otherwise, same as
+    // today's manual-entry path. Only overwrites Run ID when it's still
+    // empty — never clobbers a Run ID the user typed in themselves or one
+    // a just-finished pipeline run already filled in.
+    async function syncRunIdFromServer() {
+        const runIdInput = $("#stratRunId");
+        if (!runIdInput || runIdInput.value.trim() || !eventName || !eventYear) return;
+        try {
+            const res = await api("/api/resolve_run_id?event_name=" + encodeURIComponent(eventName)
+                + "&event_year=" + encodeURIComponent(eventYear));
+            if (res.run_id) {
+                runIdInput.value = res.run_id;
+                if (res.sku_grp && $("#stratSkuGrp")) $("#stratSkuGrp").value = res.sku_grp;
+            }
+        } catch (e) {
+            // Non-fatal — leave the fields as-is for manual entry.
+        }
+    }
+
     // ── Loading / Toast ────────────────────────────────────────────
     function showLoading(msg) {
         const el = $("#loadingText");
@@ -158,6 +232,12 @@
         $("#loadingOverlay").classList.add("active");
     }
     function hideLoading() { $("#loadingOverlay").classList.remove("active"); }
+
+    // Single source of truth for #btnGoInsert's disabled state.
+    function refreshNextButtonState() {
+        const btn = $("#btnGoInsert");
+        if (btn) btn.disabled = !uploadValidated;
+    }
 
     function toast(msg, type = "success") {
         const c = $("#toastContainer"), t = document.createElement("div");
@@ -198,17 +278,29 @@
         // Auto-fill Step 6 (Run Assortment Tool) run-context defaults
         if (n === 6 && ldapUser && eventName) {
             if ($("#stratEmail") && !$("#stratEmail").value) $("#stratEmail").value = userEmail;
+            // Try Run ID first (it fills SKU Group itself when it finds a
+            // match) — syncSkuGrpFromServer() is still the fallback for
+            // whichever fills Run ID in some other way (typed by hand, or a
+            // pipeline run finishing while already on this step).
+            syncRunIdFromServer();
             syncSkuGrpFromServer();
         }
 
         // Refresh the "Follow last year's strategy?" offer when arriving at
-        // Step 2, in case Step 1's lookup changed since last time. Also
-        // silently checks for a prior-year match on the user's behalf if
-        // they never clicked "View Last Year's Strategy" themselves —
-        // refreshFollowLastYearUI() runs again once that resolves.
+        // Step 2, in case Step 1's lookup changed since last time. This only
+        // ever has something to show if the user actually clicked "View
+        // Last Year's Strategy" on Step 1 first — there's no silent
+        // background lookup here, so a strategy is never pre-filled without
+        // the user explicitly asking for it.
         if (n === 2) {
-            triggerAutoPriorYearCheck?.();
             refreshFollowLastYearUI();
+            // The Bulk/Parcel split only ever applies to DC Selection — only
+            // show the opt-in checkbox if that's already the active strategy
+            // (e.g. returning to Step 2 after picking it earlier); the
+            // strategy radios' own change handler shows/hides this the rest
+            // of the time.
+            const stockTypeBox = $("#stockTypeSplitBox");
+            if (stockTypeBox) stockTypeBox.style.display = selectedStrategy === "DC_SELECTION" ? "block" : "none";
         }
 
         // Load cost model preview when arriving at step 6
@@ -238,19 +330,15 @@
         function syncImportToggle() {
             includesImports = document.querySelector('input[name="importToggle"]:checked')?.value === "true";
             const csStep1 = $("#containerSizeStep1");
-            const titleText = $("#templateTitleText");
             const descText = $("#templateDescText");
             const btnText = $("#btnDownloadTemplate");
 
             if (csStep1) csStep1.style.display = includesImports ? "block" : "none";
-            if (titleText) {
-                titleText.innerHTML = `<i class="fas fa-file-excel" style="color:#107c41;margin-right:6px"></i> ${includesImports ? "Import Template" : "Domestic Template"}`;
-            }
             if (descText) {
                 descText.innerHTML = includesImports ? "*requires Factory ID" : "";
             }
             if (btnText) {
-                btnText.innerHTML = `<i class="fas fa-download"></i> Download`;
+                btnText.innerHTML = `<i class="fas fa-download"></i> Download ${includesImports ? "Import" : "Domestic"} Template`;
             }
         }
 
@@ -341,6 +429,19 @@
         return _CAMPUS_MAIN_SUFFIX_DCS.has(dcNbr) ? `${base} MAIN` : base;
     }
 
+    // The prior-year card (and the lastPriorYearStrategy it's cached onto)
+    // is looked up by Event Name — switching it on Step 1 (e.g. from GIFT
+    // CENTER to PATIO) left "2026 GIFT CENTER DOMESTIC" showing under
+    // "PATIO", a completely different event's card. Hide it and drop the
+    // cache rather than leave it lying around; a fresh "View Last Year's
+    // Strategy" click repopulates it for whatever event is selected now.
+    function clearPriorYearStrategy() {
+        lastPriorYearStrategy = null;
+        const section = $("#priorStrategySection");
+        if (section) { section.style.display = "none"; section.innerHTML = ""; }
+        refreshFollowLastYearUI();
+    }
+
     async function setupPriorYearStrategy() {
         const select = $("#step1EventNameSelect");
         const customInput = $("#step1EventNameCustom");
@@ -373,18 +474,40 @@
                 select.innerHTML = `<option value="__other__" class="new-event-option">+ ADD A NEW EVENT…</option>`;
             }
             select.addEventListener("change", () => {
+                clearPriorYearStrategy();
                 const isOther = select.value === "__other__";
                 if (customInput) {
                     customInput.style.display = isOther ? "block" : "none";
                     if (isOther) customInput.focus();
                 }
                 updatePriorYearAvailability();
+                scheduleAutoPriorYearCheck();
             });
             updatePriorYearAvailability();
             customInput?.addEventListener("input", () => {
                 customInput.value = customInput.value.toUpperCase();
+                scheduleAutoPriorYearCheck(600); // debounced — this one's free text
             });
         }
+
+        // Changing the year or event type invalidates whatever prior-year
+        // card is currently showing (it was looked up for a different
+        // combination) — clear it, then silently re-check in the background
+        // once name/year/type all resolve to a real combination (see
+        // scheduleAutoPriorYearCheck/autoCheckPriorYearIfReady below). The
+        // manual "View Last Year's Strategy" button still works the same
+        // way too, e.g. to force a re-check or use the Import/Domestic
+        // fallback prompt.
+        yearInput?.addEventListener("input", () => {
+            clearPriorYearStrategy();
+            scheduleAutoPriorYearCheck(600);
+        });
+        document.addEventListener("change", (e) => {
+            if (e.target?.name === "importToggle") {
+                clearPriorYearStrategy();
+                scheduleAutoPriorYearCheck();
+            }
+        });
 
         function currentEventName() {
             if (select?.value === "__other__") {
@@ -396,13 +519,22 @@
             return select?.value || "";
         }
 
-        // Shared by the manual "View Last Year's Strategy" click and the
-        // silent auto-check triggered on arrival at Step 2 — fetches the
-        // prior-year lookup, records it onto lastPriorYearStrategy, and (when
-        // Step 1's section is present) renders the same summary card either
-        // way, so revisiting Step 1 after an auto-check shows the same thing
-        // a manual check would have.
+        // Runs the prior-year lookup and records it onto lastPriorYearStrategy,
+        // rendering the summary card into Step 1's section. Called both from
+        // the manual "View Last Year's Strategy" click (and its "Did you
+        // mean Import/Domestic?" fallback buttons) and from the silent
+        // background auto-check (autoCheckPriorYearIfReady) that fires once
+        // event name/year/type resolve to a real combination — either way,
+        // Step 2's "Follow last year's strategy?" offer only ever shows if
+        // this actually found a match, never a strategy pre-filled from thin air.
         async function performPriorYearCheck(name, year, isImportVal) {
+            // A file already validated for a different event/year/type is now
+            // stale — Step 2 must not carry it forward under whatever's just
+            // been looked up here, so clear it before running the lookup.
+            const checkKey = `${name}|${year}|${isImportVal}`;
+            if (lastUploadEventKey && lastUploadEventKey !== checkKey) {
+                await resetStep2Upload();
+            }
             const params = new URLSearchParams({ event_name: name, event_year: year });
             if (isImportVal) params.set("is_import", isImportVal);
             const result = await api(`/api/prior_year_strategy?${params}`);
@@ -505,38 +637,115 @@
                     <div><span>Total SKUs</span><strong>${fmtNum(o.distinct_thd_keys)}</strong></div>
                     <div><span>Total DCs Used</span><strong>${fmtNum(o.normalized_dc_count)}</strong></div>
                 </div>`;
-            if (result.strategy_summary?.length) {
-                html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">${isVendorAligned ? "Vendor DC Details" : "Assortment DC Details"}</div>`;
+            const hasDcDetails = result.strategy_summary?.length && !isVendorAligned;
+            if (result.strategy_summary?.length && isVendorAligned) {
+                html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">Vendor DC Details</div>`;
                 // Highest DC count first, then (within the same DC count)
                 // whichever row covers the most SKUs — e.g. among several
                 // 9-DC rows, the one with 600 SKUs outranks one with 4.
                 const sortedSummary = [...result.strategy_summary].sort((a, b) =>
                     (b.dc_count ?? 0) - (a.dc_count ?? 0) || (b.thd_key_count ?? 0) - (a.thd_key_count ?? 0));
                 for (const s of sortedSummary) {
-                    const label = isVendorAligned ? (s.vendor || "—") : (s.asmt_id ?? "—");
-                    const rowClass = isVendorAligned ? " prior-strategy-detail-row-vendor" : "";
-                    const thdKeysCell = isVendorAligned ? `<span>${fmtNum(s.thd_key_count)} SKUs</span>` : "";
-                    html += `<div class="prior-strategy-detail-row${rowClass}"><strong>${label}</strong><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span>${thdKeysCell}</div>`;
+                    html += `<div class="prior-strategy-detail-row prior-strategy-detail-row-vendor"><strong>${s.vendor || "—"}</strong><small title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</small><span>${s.dc_count ?? "—"} DC${s.dc_count === 1 ? "" : "s"}</span><span>${fmtNum(s.thd_key_count)} SKUs</span></div>`;
                 }
                 html += `</div>`;
             }
-            if (result.by_dc?.length) {
-                // by_dc is raw (unfolded) — Perris Bulk/Main and Locust Grove
-                // Bulk/Main show as separate rows even for a merged campus,
-                // since this is meant to show exactly which physical
-                // buildings units/cube actually landed in. Placed last, after
-                // the vendor/assortment DC details above. Already sorted by
-                // units descending from the backend.
+            // by_dc is raw (unfolded) — Perris Bulk/Main and Locust Grove
+            // Bulk/Main show as separate rows even for a merged campus, since
+            // this is meant to show exactly which physical buildings units/
+            // cube actually landed in. Already sorted by units descending
+            // from the backend.
+            const hasByDc = !!result.by_dc?.length;
+            if (hasByDc) {
                 html += `<div class="prior-strategy-details"><div class="prior-strategy-details-title">By DFC — Units &amp; Cube</div>
                     <table class="prior-strategy-dc-table"><thead><tr><th>DFC</th><th>Units</th><th>Cube</th></tr></thead><tbody>`;
                 for (const d of result.by_dc) {
                     html += `<tr><td>${dfcDisplayName(d.dc_nbr).toUpperCase()}</td><td>${fmtCompact(d.units)}</td><td>${fmtCompact(d.cube)}</td></tr>`;
                 }
+                html += `</tbody></table>`;
+                // The DC Details breakdown below is hidden behind this toggle
+                // — it's the same data as the metrics/By DFC table above, just
+                // broken out per DC-count tier, so it's secondary detail most
+                // people won't need to see by default.
+                if (hasDcDetails) {
+                    html += `<button type="button" class="btn btn-primary" id="btnTogglePriorDcDetails" style="margin-top:12px;font-size:.8rem">
+                        <i class="fas fa-table"></i> View DC Details
+                    </button>`;
+                }
+                html += `</div>`;
+            }
+            if (hasDcDetails) {
+                // Non-vendor-aligned: ASMT_ID is null on every backfilled row,
+                // so there's no meaningful per-assortment grouping to show —
+                // group by each key's actual DC set instead (same breakdown
+                // dc_counts_by_key/is_cascading are computed from), so this
+                // always has something real to show.
+                const sortedSummary = [...result.strategy_summary].sort((a, b) =>
+                    (a.dc_count ?? 0) - (b.dc_count ?? 0) || (a.dc_list || "").localeCompare(b.dc_list || ""));
+                // Only actually hidden-behind-the-toggle when the By DFC table
+                // rendered above it to reveal it — otherwise (rare: no by_dc
+                // data at all) it's shown directly so it's never stuck
+                // permanently inaccessible.
+                html += `<div class="prior-strategy-details" id="priorDcDetailsBox" style="${hasByDc ? "display:none;margin-top:16px" : ""}">
+                    <div class="prior-strategy-details-title">DC Details</div>
+                    <table class="prior-strategy-dc-table dc-details-table">
+                    <thead><tr><th>DC Count</th><th>DC Names</th><th>DC List</th><th>Total SKUs</th></tr></thead><tbody>`;
+                for (const s of sortedSummary) {
+                    html += `<tr><td>${s.dc_count ?? "—"}</td><td title="${s.dc_list || ""}">${s.dc_name_list || s.dc_list || "—"}</td><td title="${s.dc_name_list || s.dc_list || ""}">${s.dc_list || "—"}</td><td>${fmtNum(s.num_keys)}</td></tr>`;
+                }
                 html += `</tbody></table></div>`;
             }
             html += `</div>`;
             section.innerHTML = html;
+            $("#btnTogglePriorDcDetails")?.addEventListener("click", () => {
+                const box = $("#priorDcDetailsBox");
+                const btn = $("#btnTogglePriorDcDetails");
+                if (!box || !btn) return;
+                const show = box.style.display === "none";
+                box.style.display = show ? "block" : "none";
+                btn.innerHTML = show
+                    ? '<i class="fas fa-table"></i> Hide DC Details'
+                    : '<i class="fas fa-table"></i> View DC Details';
+            });
             return result;
+        }
+
+        // Debounced background check: fires shortly after event name, year,
+        // and Domestic/Import all resolve to a real combination, without
+        // requiring the "View Last Year's Strategy" click. Skips a combo
+        // it's already checked (autoPriorYearCheckedFor) so switching back
+        // and forth between two events already looked up doesn't re-fetch
+        // either one, and stays silent on failure — this is a convenience,
+        // not a user-initiated action, so it shouldn't toast an error the
+        // manual button would still be able to explain properly.
+        function scheduleAutoPriorYearCheck(delay = 300) {
+            clearTimeout(autoPriorYearCheckTimer);
+            autoPriorYearCheckTimer = setTimeout(autoCheckPriorYearIfReady, delay);
+        }
+
+        async function autoCheckPriorYearIfReady() {
+            if (select?.value === "__other__") return; // nothing on file yet for a brand-new event name
+            const name = currentEventName();
+            const year = yearInput?.value?.trim();
+            if (!name || !year) return;
+            const isImportVal = document.querySelector('input[name="importToggle"]:checked')?.value;
+            const checkKey = `${name}|${year}|${isImportVal}`;
+            if (autoPriorYearCheckedFor === checkKey) return;
+            autoPriorYearCheckedFor = checkKey;
+            priorYearCheckInFlight = true;
+            try {
+                await performPriorYearCheck(name, year, isImportVal);
+                // The user may already be on Step 2 by the time this
+                // resolves (its debounce + network round trip can outlast a
+                // fast click to Next) — refresh its offer now rather than
+                // leaving it showing nothing until some later, unrelated
+                // event happens to call refreshFollowLastYearUI again.
+                if (currentStep === 2) refreshFollowLastYearUI();
+            } catch (e) {
+                // Silent — see comment above.
+            } finally {
+                priorYearCheckInFlight = false;
+            }
         }
 
         $("#btnCheckPriorStrategy")?.addEventListener("click", async () => {
@@ -554,42 +763,12 @@
             showLoading("Checking for a prior year's strategy…");
             try {
                 await performPriorYearCheck(name, year, isImportVal);
-                autoPriorYearCheckedFor = `${name}|${year}|${isImportVal}`;
             } catch (e) {
                 toast("Failed to check prior year strategy: " + e.message, "error");
             } finally {
                 hideLoading();
             }
         });
-
-        // Silently runs the same lookup when the user reaches Step 2 without
-        // ever clicking "View Last Year's Strategy" — if there's a matching
-        // prior-year event, Step 2 pre-fills from it just like a manual check
-        // would; if there's no match, this quietly does nothing. Skipped for
-        // a brand-new ("__other__") event, which by definition has no history.
-        triggerAutoPriorYearCheck = async () => {
-            if (select?.value === "__other__") return;
-            const name = currentEventName();
-            const year = yearInput?.value?.trim();
-            if (!name || !year) return;
-            const isImportVal = document.querySelector('input[name="importToggle"]:checked')?.value;
-            const key = `${name}|${year}|${isImportVal}`;
-            if (autoPriorYearCheckedFor === key) return;
-            autoPriorYearCheckedFor = key;
-            priorYearCheckInFlight = true;
-            const nextBtn = $("#btnGoInsert");
-            const nextBtnWasDisabled = nextBtn?.disabled;
-            if (nextBtn) nextBtn.disabled = true;
-            try {
-                await performPriorYearCheck(name, year, isImportVal);
-            } catch (e) {
-                return; // best-effort convenience pre-fill — not worth surfacing an error for
-            } finally {
-                priorYearCheckInFlight = false;
-                if (nextBtn) nextBtn.disabled = nextBtnWasDisabled;
-            }
-            if (currentStep === 2) refreshFollowLastYearUI();
-        };
     }
 
     // ── Section 2: File Upload ─────────────────────────────────────
@@ -631,6 +810,9 @@
         // no longer reflects what's on screen — the next insert must be real,
         // not skipped as "already done."
         dataInserted = false;
+        // A fresh file also invalidates any bulk/parcel classification run
+        // against the old one — force it to be re-run before it's trusted again.
+        resetStockTypeSplit();
         dcSelectionCostModelSubmitted = false;
 
         $("#fileName").textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
@@ -657,6 +839,9 @@
         try {
             const result = await api("/api/upload", { method: "POST", body: formData });
             displayValidation(result);
+            if (result.passed) {
+                lastUploadEventKey = `${(step1IsExistingEvent ? step1EventSelect.value : (step1EventCustom?.value || "")).trim()}|${$("#step1EventYear")?.value?.trim() || ""}|${includesImports.toString()}`;
+            }
             // EVENTS_SKU_LIST isn't written yet at this point — that now only
             // happens once the user commits (Confirm Vendor Strategies, or
             // Step 2's Next for DC Selection), not just because a file passed
@@ -686,7 +871,8 @@
         if (result.import_mismatch) {
             $("#checksList").innerHTML = "";
             $("#successSection").style.display = "none";
-            $("#btnGoInsert").disabled = true;
+            uploadValidated = false;
+            refreshNextButtonState();
             $("#importMismatchAlert").style.display = "block";
             toast(result.import_mismatch_msg, "error");
             return;
@@ -775,17 +961,30 @@
                 distContainer.style.display = "block";
                 recalcFactoryDist();
                 $("#btnDownloadFactoryDist")?.addEventListener("click", downloadFactoryDist);
-            } else if (distContainer) {
-                distContainer.style.display = "none";
+            } else {
+                // Clear out whatever a *previous* upload left behind — a
+                // reupload with no factory data (e.g. it's now domestic, or
+                // FACTORY_ID was dropped) must not keep the old file's stale
+                // distribution around for the low-volume check below to use.
+                window._factoryDist = null;
+                if (distContainer) distContainer.style.display = "none";
             }
+            // Re-upload/re-validation refreshes window._factoryDist above, but
+            // the DC toggle grid's own selection doesn't change just because
+            // of that — nothing re-clicks it, so nothing would otherwise
+            // re-run the low-volume check against the new data until the
+            // user happened to retoggle a DC count. Refresh it here too.
+            renderLowVolumeAlert();
             eventName = result.summary.event_name || "";
             eventYear = result.summary.event_year || "";
             waveCount = result.summary.wave_count || 0;
-            $("#btnGoInsert").disabled = false;
+            uploadValidated = true;
+            refreshNextButtonState();
             toast("File validation passed!", "success");
         } else {
             $("#successSection").style.display = "none";
-            $("#btnGoInsert").disabled = true;
+            uploadValidated = false;
+            refreshNextButtonState();
             // Auto-expand failed check details so the user sees errors immediately
             container.querySelectorAll(".check-item").forEach(item => {
                 if (item.querySelector(".check-fail")) {
@@ -801,6 +1000,105 @@
         // Hide FYI section (details now inline under checks)
         const warnSection = $("#warningSection");
         if (warnSection) warnSection.style.display = "none";
+    }
+
+    // Wipes Step 2's uploaded-file state — client-side display and the
+    // server's cached upload alike — so a file validated for one event/year/
+    // type never lingers once Step 1 looks up a *different* combination's
+    // prior-year strategy. Called from performPriorYearCheck when it detects
+    // that mismatch; a no-op in effect (server clear aside) if nothing was
+    // ever uploaded.
+    async function resetStep2Upload() {
+        // eventName/eventYear are only ever (re-)set from a successful file-
+        // validation response (see handleFile) — clearing them here too, not
+        // just lastUploadEventKey, means any action still gated on eventName
+        // (matchVendorStrategy, doInsert, submitCostModel, "Use last year's
+        // strategy") fails closed until the new event is actually uploaded,
+        // rather than silently running against the previous event's stale name.
+        eventName = "";
+        eventYear = "";
+        waveCount = 0;
+        dataInserted = false;
+        dcSelectionCostModelSubmitted = false;
+        lastUploadEventKey = null;
+        resetStockTypeSplit();
+        const fileInput = $("#fileInput");
+        if (fileInput) fileInput.value = "";
+        const fileNameEl = $("#fileName");
+        if (fileNameEl) fileNameEl.textContent = "";
+        const validationResults = $("#validationResults");
+        if (validationResults) validationResults.style.display = "none";
+        $("#checksList")?.replaceChildren();
+        const successSection = $("#successSection");
+        if (successSection) successSection.style.display = "none";
+        const errorSection = $("#errorSection");
+        if (errorSection) errorSection.style.display = "none";
+        const importMismatchEl = $("#importMismatchAlert");
+        if (importMismatchEl) importMismatchEl.style.display = "none";
+        uploadValidated = false;
+        refreshNextButtonState();
+        const distContainer = $("#factoryDistribution");
+        if (distContainer) distContainer.style.display = "none";
+        window._factoryDist = null;
+        const followLastYearNote = $("#followLastYearNote");
+        if (followLastYearNote) followLastYearNote.style.display = "none";
+        resetStep2VendorAndSubmissionState();
+        try {
+            await api("/api/clear_upload_cache", { method: "POST" });
+        } catch (e) {
+            // Best-effort — the next real upload overwrites the server cache
+            // anyway, so a failed clear here isn't worth surfacing.
+        }
+    }
+
+    // Wipes everything Step 2 shows about a *submission* — the Vendor-Aligned
+    // supplier/DC match table, the "Confirm Vendor Strategies" button state,
+    // and any "already submitted"/delete-previous-submission banner — none of
+    // which resetStep2Upload above touches on its own even though all of it
+    // is just as tied to one specific event as the uploaded file is. Without
+    // this, switching events in Step 1 left the *previous* event's Supplier DC
+    // Assignments table and submission banners on screen in Step 2, since
+    // those are only ever populated by matchVendorStrategy()/loadCostModelPreview()
+    // and nothing previously cleared them when the event changed underneath.
+    function resetStep2VendorAndSubmissionState() {
+        vendorMatches = [];
+        vendorStrategyConfirmed = false;
+        skipResubmitBecauseUnchanged = false;
+
+        const vendorMatchResult = $("#vendorMatchResult");
+        if (vendorMatchResult) vendorMatchResult.style.display = "none";
+        const vendorMatchSummary = $("#vendorMatchSummary");
+        if (vendorMatchSummary) vendorMatchSummary.innerHTML = "";
+        const vendorSupplierSummary = $("#vendorSupplierSummary");
+        if (vendorSupplierSummary) vendorSupplierSummary.innerHTML = "";
+
+        const btnConfirmVendorStrategy = $("#btnConfirmVendorStrategy");
+        if (btnConfirmVendorStrategy) {
+            btnConfirmVendorStrategy.disabled = false;
+            btnConfirmVendorStrategy.innerHTML = '<i class="fas fa-check"></i> Confirm Vendor Strategies';
+        }
+        const vendorSubmitStatus = $("#vendorSubmitStatus");
+        if (vendorSubmitStatus) vendorSubmitStatus.innerHTML = "";
+        const btnDeleteVendorCostModel = $("#btnDeleteVendorCostModel");
+        if (btnDeleteVendorCostModel) btnDeleteVendorCostModel.style.display = "none";
+
+        const dcSelectionSubmitStatus = $("#dcSelectionSubmitStatus");
+        if (dcSelectionSubmitStatus) dcSelectionSubmitStatus.innerHTML = "";
+        const btnDeleteDcCostModel = $("#btnDeleteDcCostModel");
+        if (btnDeleteDcCostModel) btnDeleteDcCostModel.style.display = "none";
+
+        const costModelPreview = $("#costModelPreview");
+        if (costModelPreview) costModelPreview.style.display = "none";
+        const costModelStatus = $("#costModelStatus");
+        if (costModelStatus) costModelStatus.innerHTML = "";
+        const btnDeleteCostModel = $("#btnDeleteCostModel");
+        if (btnDeleteCostModel) btnDeleteCostModel.style.display = "none";
+
+        const vendorChartContainer = $("#vendorChartContainer");
+        if (vendorChartContainer) vendorChartContainer.style.display = "none";
+        if (vendorPieChart) { vendorPieChart.destroy(); vendorPieChart = null; }
+        if (skuUnitsPieChart) { skuUnitsPieChart.destroy(); skuUnitsPieChart = null; }
+        if (skuCountPieChart) { skuCountPieChart.destroy(); skuCountPieChart = null; }
     }
 
     function getContainerDivisor() {
@@ -824,24 +1122,28 @@
         const sorted = [...dist].sort((a, b) => hasCube
             ? ((b.factory_cube || 0) / divisor) - ((a.factory_cube || 0) / divisor)
             : (b.optimal_buy_units || 0) - (a.optimal_buy_units || 0));
-        let totalSkus = 0, totalUnits = 0, totalContainers = 0;
+        let totalSkus = 0, totalContainers = 0;
         for (const f of sorted) {
             const c = (f.factory_cube || 0) / divisor;
             const containers = hasCube ? c.toFixed(2) : "—";
             totalSkus += f.sku_count || 0;
-            totalUnits += f.optimal_buy_units || 0;
             totalContainers += c;
             const tr = document.createElement("tr");
-            tr.innerHTML = `<td>${f.factory_id}</td><td style="text-align:right">${fmtNum(f.sku_count)}</td><td style="text-align:right">${fmtNum(f.optimal_buy_units)}</td><td style="text-align:right">${containers}</td>`;
+            tr.innerHTML = `<td>${f.factory_id}</td><td style="text-align:right">${containers}</td><td style="text-align:right">${fmtNum(f.sku_count)}</td>`;
             tbody.appendChild(tr);
         }
         const tfoot = document.createElement("tr");
         tfoot.style.fontWeight = "700";
         tfoot.style.borderTop = "2px solid #333";
-        tfoot.innerHTML = `<td>Total</td><td style="text-align:right">${fmtNum(totalSkus)}</td><td style="text-align:right">${fmtNum(totalUnits)}</td><td style="text-align:right">${hasCube ? totalContainers.toFixed(2) : "—"}</td>`;
+        tfoot.innerHTML = `<td>Total</td><td style="text-align:right">${hasCube ? totalContainers.toFixed(2) : "—"}</td><td style="text-align:right">${fmtNum(totalSkus)}</td>`;
         tbody.appendChild(tfoot);
 
         renderFactoryDistChart(sorted, hasCube, divisor);
+        // The chart above was just rebuilt from scratch, wiping any prior
+        // low-volume highlight — re-derive it (a no-op if DC counts haven't
+        // been picked yet) instead of leaving it stale until the next DC
+        // toggle click.
+        renderLowVolumeAlert();
     }
 
     // ── Factory distribution bar chart ──────────────────────────────
@@ -876,11 +1178,22 @@
     }
 
     function renderFactoryDistChart(sorted, hasCube, divisor) {
-        const svg = $("#factoryDistChart");
         const metricLabel = $("#factoryDistChartMetricLabel");
+        if (metricLabel) metricLabel.textContent = hasCube ? "Containers" : "Optimal Buy Units";
+        // Containers have a real physical unit worth drawing one dot per —
+        // Optimal Buy Units (the fallback before real factory cube is known)
+        // doesn't, so that case stays a plain bar rather than a fake dot plot.
+        if (hasCube) {
+            renderFactoryDistDots(sorted, divisor);
+        } else {
+            renderFactoryDistBars(sorted, divisor);
+        }
+    }
+
+    function renderFactoryDistBars(sorted, divisor) {
+        const svg = $("#factoryDistChart");
         const tooltip = $("#factoryDistTooltip");
         if (!svg) return;
-        if (metricLabel) metricLabel.textContent = hasCube ? "Containers" : "Optimal Buy Units";
         svg.innerHTML = "";
         if (!sorted || !sorted.length) {
             svg.setAttribute("width", "0");
@@ -889,7 +1202,7 @@
         }
 
         const svgNS = "http://www.w3.org/2000/svg";
-        const values = sorted.map(f => hasCube ? (f.factory_cube || 0) / divisor : (f.optimal_buy_units || 0));
+        const values = sorted.map(f => f.optimal_buy_units || 0);
         const niceMax = niceAxisMax(Math.max(...values, 0));
 
         const barW = 22, barGap = 10;
@@ -920,7 +1233,7 @@
             tickLabel.setAttribute("x", plotLeft - 6);
             tickLabel.setAttribute("y", y + 3);
             tickLabel.setAttribute("class", "chart-y-tick-label");
-            tickLabel.textContent = hasCube ? val.toFixed(1) : fmtNum(Math.round(val));
+            tickLabel.textContent = fmtNum(Math.round(val));
             svg.appendChild(tickLabel);
         }
 
@@ -933,10 +1246,11 @@
             const bar = document.createElementNS(svgNS, "path");
             bar.setAttribute("d", roundedTopRectPath(x, y, barW, barH, 4));
             bar.setAttribute("class", "chart-bar");
+            bar.setAttribute("data-factory-id", f.factory_id);
             bar.setAttribute("tabindex", "0");
             bar.setAttribute("role", "img");
-            const valueText = hasCube ? `${val.toFixed(2)} containers` : `${fmtNum(Math.round(val))} optimal buy units`;
-            bar.setAttribute("aria-label", `Factory ${f.factory_id}: ${valueText}, ${f.sku_count} distinct THD keys`);
+            const valueText = `${fmtNum(Math.round(val))} optimal buy units`;
+            bar.setAttribute("aria-label", `Factory ${f.factory_id}: ${valueText}, ${f.sku_count} distinct records`);
             svg.appendChild(bar);
 
             // Distinct THD Key count, direct-labeled above every bar (the one
@@ -960,8 +1274,8 @@
                 const showTip = (evt) => {
                     bar.classList.add("is-active");
                     tooltip.innerHTML = `<div>Factory <strong>${f.factory_id}</strong></div>`
-                        + `<div>${hasCube ? "Containers" : "Optimal Buy Units"}: <strong>${hasCube ? val.toFixed(2) : fmtNum(f.optimal_buy_units)}</strong></div>`
-                        + `<div>Distinct THD Keys: <strong>${fmtNum(f.sku_count)}</strong></div>`;
+                        + `<div>Optimal Buy Units: <strong>${fmtNum(f.optimal_buy_units)}</strong></div>`
+                        + `<div>Distinct Records: <strong>${fmtNum(f.sku_count)}</strong></div>`;
                     tooltip.style.display = "block";
                     if (evt.clientX != null) positionChartTooltip(evt, tooltip);
                 };
@@ -981,6 +1295,216 @@
         });
     }
 
+    // ── Factory distribution dot plot (waffle grid) ─────────────────
+    // One square dot = one shipping container. Dots wrap into a fixed-width
+    // grid (GRID_COLS wide) per factory instead of one tall column, so a
+    // 50-container factory stays as readable as a 2-container one — the
+    // chart's height grows with the tallest *grid* (rows), not with the raw
+    // container count. A fractional container (e.g. 45.3) gets one extra
+    // dot whose fill only covers that fraction, anchored to the dot's own
+    // bottom edge, so it visually reads as "partially filled."
+    const DOT_GRID_COLS = 5;
+    const DOT_SIZE = 7;
+    const DOT_GAP = 2;
+    const DOT_ROW_H = DOT_SIZE + DOT_GAP;
+
+    // How many dots (whole + one partial) a container value needs, and the
+    // fraction (0 when the value lands on a whole number) the last dot
+    // should show as filled. Rounds to hundredths first so float noise from
+    // cube/divisor division (e.g. 44.999999999) never manufactures a
+    // spurious near-zero partial dot.
+    function dotsForContainerValue(v) {
+        const rounded = Math.round(Math.max(v, 0) * 100) / 100;
+        const whole = Math.floor(rounded + 1e-9);
+        const frac = Math.round((rounded - whole) * 100) / 100;
+        const hasPartial = frac > 0.004;
+        return { whole, frac: hasPartial ? frac : 0, total: whole + (hasPartial ? 1 : 0) };
+    }
+
+    function roundedRectPath(x, y, w, h, r) {
+        r = Math.max(0, Math.min(r, h / 2, w / 2));
+        if (h <= 0 || w <= 0) return "";
+        return `M${x + r},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} `
+            + `L${x + w},${y + h - r} Q${x + w},${y + h} ${x + w - r},${y + h} `
+            + `L${x + r},${y + h} Q${x},${y + h} ${x},${y + h - r} `
+            + `L${x},${y + r} Q${x},${y} ${x + r},${y} Z`;
+    }
+
+    function renderFactoryDistDots(sorted, divisor) {
+        const svg = $("#factoryDistChart");
+        const tooltip = $("#factoryDistTooltip");
+        if (!svg) return;
+        svg.innerHTML = "";
+        if (!sorted || !sorted.length) {
+            svg.setAttribute("width", "0");
+            svg.setAttribute("height", "0");
+            return;
+        }
+
+        const svgNS = "http://www.w3.org/2000/svg";
+        const values = sorted.map(f => (f.factory_cube || 0) / divisor);
+        const niceMax = niceAxisMax(Math.max(...values, 0));
+        const dotCounts = values.map(dotsForContainerValue);
+
+        const slotW = DOT_GRID_COLS * DOT_SIZE + (DOT_GRID_COLS - 1) * DOT_GAP;
+        const slotGap = 16;
+        // Rows needed to reach niceMax (always >= every real value — see
+        // niceAxisMax), so every factory's own grid always fits within it.
+        const rowsForNiceMax = Math.max(1, Math.ceil(niceMax / DOT_GRID_COLS));
+        const plotHeight = rowsForNiceMax * DOT_SIZE + (rowsForNiceMax - 1) * DOT_GAP;
+
+        const plotLeft = 44, plotRight = 12, plotTop = 20, plotBottom = 58;
+        const chartWidth = plotLeft + sorted.length * (slotW + slotGap) - slotGap + plotRight;
+        const chartHeight = plotTop + plotHeight + plotBottom;
+        const baselineY = plotTop + plotHeight;
+
+        svg.setAttribute("width", chartWidth);
+        svg.setAttribute("height", chartHeight);
+        svg.setAttribute("viewBox", `0 0 ${chartWidth} ${chartHeight}`);
+
+        // Y gridlines + ticks, in units of containers — a continuous
+        // reference scale over the discrete dot grid underneath it.
+        const tickCount = 4;
+        for (let i = 0; i <= tickCount; i++) {
+            const val = (niceMax / tickCount) * i;
+            const y = baselineY - (val / DOT_GRID_COLS) * DOT_ROW_H;
+
+            const grid = document.createElementNS(svgNS, "line");
+            grid.setAttribute("x1", plotLeft);
+            grid.setAttribute("x2", chartWidth - plotRight);
+            grid.setAttribute("y1", y);
+            grid.setAttribute("y2", y);
+            grid.setAttribute("class", i === 0 ? "chart-baseline" : "chart-grid-line");
+            svg.appendChild(grid);
+
+            const tickLabel = document.createElementNS(svgNS, "text");
+            tickLabel.setAttribute("x", plotLeft - 6);
+            tickLabel.setAttribute("y", y + 3);
+            tickLabel.setAttribute("class", "chart-y-tick-label");
+            tickLabel.textContent = val.toFixed(1);
+            svg.appendChild(tickLabel);
+        }
+
+        sorted.forEach((f, i) => {
+            const val = values[i];
+            const { frac, total } = dotCounts[i];
+            const rows = total > 0 ? Math.ceil(total / DOT_GRID_COLS) : 0;
+            const slotX = plotLeft + i * (slotW + slotGap);
+
+            const group = document.createElementNS(svgNS, "g");
+            group.setAttribute("class", "chart-dot-group");
+            group.setAttribute("data-factory-id", f.factory_id);
+            group.setAttribute("tabindex", "0");
+            group.setAttribute("role", "img");
+            group.setAttribute("aria-label",
+                `Factory ${f.factory_id}: ${val.toFixed(2)} containers, ${f.sku_count} distinct records`);
+
+            for (let d = 0; d < total; d++) {
+                const row = Math.floor(d / DOT_GRID_COLS);
+                const col = d % DOT_GRID_COLS;
+                const dotX = slotX + col * (DOT_SIZE + DOT_GAP);
+                const dotY = baselineY - (row + 1) * DOT_SIZE - row * DOT_GAP;
+                const isPartial = frac > 0 && d === total - 1;
+
+                if (!isPartial) {
+                    const dot = document.createElementNS(svgNS, "rect");
+                    dot.setAttribute("x", dotX);
+                    dot.setAttribute("y", dotY);
+                    dot.setAttribute("width", DOT_SIZE);
+                    dot.setAttribute("height", DOT_SIZE);
+                    dot.setAttribute("rx", 2);
+                    dot.setAttribute("class", "chart-dot");
+                    group.appendChild(dot);
+                } else {
+                    // Partial container: a light, outlined full-size cell
+                    // underneath, and a fill clipped to that same rounded
+                    // shape but only as tall as the fraction, anchored to
+                    // the dot's bottom edge — reads as "part-full."
+                    const clipId = `dotPartialClip-${i}-${d}`;
+                    const clip = document.createElementNS(svgNS, "clipPath");
+                    clip.setAttribute("id", clipId);
+                    const clipShape = document.createElementNS(svgNS, "path");
+                    clipShape.setAttribute("d", roundedRectPath(dotX, dotY, DOT_SIZE, DOT_SIZE, 2));
+                    clip.appendChild(clipShape);
+                    group.appendChild(clip);
+
+                    const bg = document.createElementNS(svgNS, "rect");
+                    bg.setAttribute("x", dotX);
+                    bg.setAttribute("y", dotY);
+                    bg.setAttribute("width", DOT_SIZE);
+                    bg.setAttribute("height", DOT_SIZE);
+                    bg.setAttribute("rx", 2);
+                    bg.setAttribute("class", "chart-dot-partial-bg");
+                    group.appendChild(bg);
+
+                    const fillH = DOT_SIZE * frac;
+                    const fill = document.createElementNS(svgNS, "rect");
+                    fill.setAttribute("x", dotX);
+                    fill.setAttribute("y", dotY + DOT_SIZE - fillH);
+                    fill.setAttribute("width", DOT_SIZE);
+                    fill.setAttribute("height", fillH);
+                    fill.setAttribute("clip-path", `url(#${clipId})`);
+                    fill.setAttribute("class", "chart-dot-partial-fill");
+                    group.appendChild(fill);
+                }
+            }
+
+            // Distinct THD Key count, direct-labeled above every factory's
+            // grid (the one number this chart deliberately puts on every
+            // mark — see comment above).
+            const topY = baselineY - (rows * DOT_SIZE + Math.max(rows - 1, 0) * DOT_GAP);
+            const countLabel = document.createElementNS(svgNS, "text");
+            countLabel.setAttribute("x", slotX + slotW / 2);
+            countLabel.setAttribute("y", Math.max(topY - 6, plotTop - 6));
+            countLabel.setAttribute("class", "chart-bar-count-label");
+            countLabel.textContent = fmtNum(f.sku_count);
+            group.appendChild(countLabel);
+
+            // Factory ID axis label, rotated to fit under a narrow slot
+            const xLabel = document.createElementNS(svgNS, "text");
+            xLabel.setAttribute("class", "chart-axis-tick-label");
+            xLabel.setAttribute("text-anchor", "end");
+            xLabel.setAttribute("transform", `translate(${slotX + slotW / 2},${baselineY + 8}) rotate(-55)`);
+            xLabel.textContent = f.factory_id;
+            group.appendChild(xLabel);
+
+            // One hit target for the whole slot (dots are too small to
+            // reliably hover individually) — drawn last so it sits on top.
+            const hit = document.createElementNS(svgNS, "rect");
+            hit.setAttribute("x", slotX - slotGap / 2);
+            hit.setAttribute("y", plotTop);
+            hit.setAttribute("width", slotW + slotGap);
+            hit.setAttribute("height", baselineY - plotTop);
+            hit.setAttribute("class", "chart-dot-hit");
+            group.appendChild(hit);
+
+            svg.appendChild(group);
+
+            if (tooltip) {
+                const showTip = (evt) => {
+                    group.classList.add("is-active");
+                    tooltip.innerHTML = `<div>Factory <strong>${f.factory_id}</strong></div>`
+                        + `<div>Containers: <strong>${val.toFixed(2)}</strong></div>`
+                        + `<div>Distinct Records: <strong>${fmtNum(f.sku_count)}</strong></div>`;
+                    tooltip.style.display = "block";
+                    if (evt.clientX != null) positionChartTooltip(evt, tooltip);
+                };
+                const hideTip = () => {
+                    group.classList.remove("is-active");
+                    tooltip.style.display = "none";
+                };
+                hit.addEventListener("pointerenter", showTip);
+                hit.addEventListener("pointermove", showTip);
+                hit.addEventListener("pointerleave", hideTip);
+                group.addEventListener("focus", () => {
+                    const box = hit.getBoundingClientRect();
+                    showTip({ clientX: box.right, clientY: box.top });
+                });
+                group.addEventListener("blur", hideTip);
+            }
+        });
+    }
+
     function downloadFactoryDist() {
         const dist = window._factoryDist;
         if (!dist) return;
@@ -989,8 +1513,8 @@
         const sorted = [...dist].sort((a, b) => hasCube
             ? ((b.factory_cube || 0) / divisor) - ((a.factory_cube || 0) / divisor)
             : (b.optimal_buy_units || 0) - (a.optimal_buy_units || 0));
-        const header = "Factory ID,Distinct THD SKUs,Optimal BUY_UNITS,Containers\n";
-        const rows = sorted.map(f => `${f.factory_id},${f.sku_count},${f.optimal_buy_units},${hasCube ? ((f.factory_cube || 0) / divisor).toFixed(2) : ""}`).join("\n");
+        const header = "Factory,Containers,Distinct Records\n";
+        const rows = sorted.map(f => `${f.factory_id},${hasCube ? ((f.factory_cube || 0) / divisor).toFixed(2) : ""},${f.sku_count}`).join("\n");
         const blob = new Blob([header + rows], {type: "text/csv"});
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
@@ -1060,8 +1584,34 @@
     // just because a file passed validation.
     function setupInsert() {
         $("#btnGoInsert")?.addEventListener("click", async () => {
-            if (priorYearCheckInFlight) {
-                toast("Still checking last year's strategy — try Next again in a moment", "error");
+            // eventName is only ever set from a successful file-validation
+            // response this page load (see handleFile) — without it,
+            // doInsert()/submitCostModel() would either fail outright
+            // ("event_name is required") or, worse, silently succeed against
+            // whatever _upload_cache still holds server-side from a previous
+            // upload/session (a bare process-global, not tied to this page).
+            // Block before either insert runs rather than let that happen.
+            if (!eventName) {
+                toast("Please upload and validate a SKU list before continuing", "error");
+                return;
+            }
+            if (stockTypeSplitEnabled && stockTypeConfirmed) {
+                segmentConfigs[currentSegment] = captureCurrentSegmentConfig();
+                const missing = ["BULK", "PARCEL"].filter(seg => !segmentConfigs[seg]);
+                if (missing.length) {
+                    toast(`Select a strategy for ${missing.map(s => s === "BULK" ? "Bulk" : "Parcel").join(" and ")} SKUs before continuing`, "error");
+                    return;
+                }
+                if (!dataInserted) {
+                    const inserted = await doInsert(false);
+                    if (!inserted) return;
+                }
+                if (!segmentedCostModelSubmitted) {
+                    const submitted = await submitCostModel();
+                    if (!submitted) return;
+                    segmentedCostModelSubmitted = true;
+                }
+                goStep(6);
                 return;
             }
             if (!selectedStrategy) {
@@ -1085,12 +1635,18 @@
                     const inserted = await doInsert(false);
                     if (!inserted) return;
                 }
-                // No separate "Confirm DC Selection" button — submit to DFC
-                // Cost Model right here the first time, same automatic-on-Next
-                // treatment Vendor-Aligned gets above. dc_inclusions/
-                // dc_exclusions (Step 2's DC filter) ride along inside
-                // submitCostModel() itself.
-                if (!dcSelectionCostModelSubmitted) {
+                // doInsert() already confirmed the row data AND this DC
+                // selection match what's on file — resubmitting would write
+                // back the exact same values, so skip it.
+                if (skipResubmitBecauseUnchanged) {
+                    skipResubmitBecauseUnchanged = false;
+                    dcSelectionCostModelSubmitted = true;
+                } else if (!dcSelectionCostModelSubmitted) {
+                    // No separate "Confirm DC Selection" button — submit to DFC
+                    // Cost Model right here the first time, same automatic-on-Next
+                    // treatment Vendor-Aligned gets above. dc_inclusions/
+                    // dc_exclusions (Step 2's DC filter) ride along inside
+                    // submitCostModel() itself.
                     const submitted = await submitCostModel();
                     if (!submitted) return;
                     dcSelectionCostModelSubmitted = true;
@@ -1103,18 +1659,421 @@
         });
     }
 
+    // ── Bulk vs. Parcel strategy split (opt-in) ────────────────────
+    // Classifies the current upload via /api/classify_stock_type — reads
+    // _upload_cache["df"] server-side (the validated Step 1 upload), so it
+    // works before a strategy is chosen and before /api/insert has ever run
+    // for this event. Never runs on its own; only when the user checks the
+    // box, since it's an extra BigQuery round trip most events don't need.
+
+    function resetStockTypeSplit() {
+        stockTypeSplitEnabled = false;
+        stockTypeConfirmed = false;
+        stockTypeRows = [];
+        stockTypeOverrides = {};
+        segmentedCostModelSubmitted = false;
+        hideSegmentTabs();
+        const toggle = $("#stockTypeSplitToggle");
+        if (toggle) toggle.checked = false;
+        const confirmBox = $("#stockTypeConfirmBox");
+        if (confirmBox) confirmBox.style.display = "none";
+        const status = $("#stockTypeSplitStatus");
+        if (status) status.innerHTML = "";
+        const actions = $("#stockTypeConfirmActions");
+        if (actions) actions.style.display = "flex";
+        const confirmedBadge = $("#stockTypeConfirmedBadge");
+        if (confirmedBadge) confirmedBadge.style.display = "none";
+    }
+
+    function effectiveStockType(row) {
+        return stockTypeOverrides[row.thd_key] || row.stock_type;
+    }
+
+    function renderStockTypeSummary() {
+        const counts = { BULK: 0, PARCEL: 0, MISSING_DATA: 0 };
+        for (const row of stockTypeRows) counts[effectiveStockType(row)] = (counts[effectiveStockType(row)] || 0) + 1;
+
+        const pill = (label, count, color) =>
+            `<div style="padding:6px 14px;border-radius:20px;background:${color}22;color:${color};font-size:.82rem;font-weight:700">
+                ${label}: ${count.toLocaleString()}
+            </div>`;
+        const summary = $("#stockTypeSummary");
+        if (summary) {
+            summary.innerHTML =
+                pill("Bulk", counts.BULK, "#c8102e") +
+                pill("Parcel", counts.PARCEL, "#0f7b3f") +
+                (counts.MISSING_DATA ? pill("Needs Input", counts.MISSING_DATA, "#856404") : "");
+        }
+
+        const missingSection = $("#stockTypeMissingSection");
+        // Everything the classifier ITSELF couldn't confidently handle — not
+        // just what's still unresolved right now — so a row the user already
+        // picked Bulk/Parcel for stays visible with an Undo option instead of
+        // vanishing the instant it's resolved.
+        const needsReviewRows = stockTypeRows.filter(row => row.stock_type === "MISSING_DATA");
+        if (missingSection) missingSection.style.display = needsReviewRows.length ? "block" : "none";
+        renderStockTypeMissingTable(needsReviewRows);
+
+        updateStockTypeSegmentVisibility();
+    }
+
+    function renderStockTypeMissingTable(rows) {
+        const container = $("#stockTypeMissingTable");
+        if (!container) return;
+        if (!rows.length) { container.innerHTML = ""; return; }
+
+        container.innerHTML = rows.map(row => {
+            const current = effectiveStockType(row);
+            const hasOverride = current !== "MISSING_DATA";
+            const btnClass = (choice) => `btn btn-sm ${current === choice ? "btn-primary" : "btn-secondary"} stock-type-override-btn`;
+            return `
+            <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #eee;font-size:.82rem">
+                <div style="flex:1">
+                    <strong>${row.thd_sku_nbr ?? row.sister_sku_nbr ?? "—"}</strong>
+                    ${row.sku_desc ? `— ${row.sku_desc}` : ""}
+                    ${row.buy_units ? `<span style="color:#888"> (${row.buy_units.toLocaleString()} units)</span>` : ""}
+                    ${row.group_size ? `<div style="color:#856404;font-size:.75rem">
+                        Shares a SKU_NBR (own or sister) with ${row.group_size - 1} other row(s) —
+                        choosing here sets all ${row.group_size} the same, to keep the upload consistent.
+                    </div>` : ""}
+                </div>
+                <button type="button" class="${btnClass("BULK")}"
+                    data-thd-key="${row.thd_key}" data-stock-type="BULK">Bulk</button>
+                <button type="button" class="${btnClass("PARCEL")}"
+                    data-thd-key="${row.thd_key}" data-stock-type="PARCEL">Parcel</button>
+                <button type="button" class="btn btn-sm btn-secondary stock-type-undo-btn"
+                    data-thd-key="${row.thd_key}" ${hasOverride ? "" : "disabled"} title="Undo — back to Needs Input">
+                    <i class="fas fa-rotate-left"></i> Undo
+                </button>
+            </div>`;
+        }).join("");
+
+        container.querySelectorAll(".stock-type-override-btn").forEach(btn => {
+            btn.addEventListener("click", () => setStockTypeOverride(btn.dataset.thdKey, btn.dataset.stockType));
+        });
+        container.querySelectorAll(".stock-type-undo-btn").forEach(btn => {
+            btn.addEventListener("click", () => undoStockTypeOverride(btn.dataset.thdKey));
+        });
+    }
+
+    async function setStockTypeOverride(thdKey, stockType) {
+        try {
+            const result = await api("/api/override_stock_type", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ thd_key: thdKey, stock_type: stockType }),
+            });
+            // The server may have propagated this to every other row sharing
+            // a SISTER_SKU_NBR (see the grouping note in app.py) — apply the
+            // same set here so the UI reflects exactly what was persisted.
+            for (const key of result.thd_keys || [thdKey]) stockTypeOverrides[key] = stockType;
+            renderStockTypeSummary();
+        } catch (e) {
+            toast(`Failed to set classification: ${e.message || e}`, "error");
+        }
+    }
+
+    // Clears a manual override, reverting the row (and any consistency-group
+    // siblings) back to the classification /api/classify_stock_type computed.
+    async function undoStockTypeOverride(thdKey) {
+        try {
+            const result = await api("/api/undo_stock_type_override", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ thd_key: thdKey }),
+            });
+            for (const key of result.thd_keys || [thdKey]) delete stockTypeOverrides[key];
+            renderStockTypeSummary();
+        } catch (e) {
+            toast(`Failed to undo classification: ${e.message || e}`, "error");
+        }
+    }
+
+    async function runStockTypeClassification() {
+        if (!eventName) {
+            toast("Please upload and validate a SKU list before splitting by bulk/parcel", "error");
+            return false;
+        }
+        const confirmBox = $("#stockTypeConfirmBox");
+        const status = $("#stockTypeSplitStatus");
+        try {
+            if (status) status.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Classifying SKUs…`;
+            if (confirmBox) confirmBox.style.display = "block";
+            const result = await api("/api/classify_stock_type", { method: "POST" });
+            stockTypeRows = result.rows || [];
+            stockTypeOverrides = {};
+            // A fresh classification run means any earlier "confirmed" state
+            // is stale — forces updateStockTypeSegmentVisibility (called via
+            // renderStockTypeSummary below) to treat this as a brand-new
+            // pass instead of assuming segmentConfigs from a previous
+            // upload/event still applies.
+            stockTypeConfirmed = false;
+            if (status) status.innerHTML = "";
+            renderStockTypeSummary();
+            return true;
+        } catch (e) {
+            if (confirmBox) confirmBox.style.display = "none";
+            toast(`Bulk/Parcel classification failed: ${e.message || e}`, "error");
+            return false;
+        }
+    }
+
+    // Re-shows exactly what was on screen before an in-page uncheck —
+    // classification rows, overrides, confirmed state and each segment's
+    // saved strategy — without re-hitting /api/classify_stock_type. Only
+    // called when stockTypeRows is already populated (see the toggle's
+    // change listener below).
+    function restoreStockTypeSplitUI() {
+        stockTypeSplitEnabled = stockTypeConfirmed;
+        const confirmBox = $("#stockTypeConfirmBox");
+        if (confirmBox) confirmBox.style.display = "block";
+        renderStockTypeSummary();
+        // renderStockTypeSummary -> updateStockTypeSegmentVisibility only
+        // acts on a CHANGE in confirmed state — nothing changed here (an
+        // in-page uncheck→recheck), so it left stockTypeConfirmed exactly as
+        // it was and never called showSegmentTabs(). Restore the tabs
+        // ourselves, with preserveState so segmentConfigs survives.
+        if (stockTypeConfirmed) showSegmentTabs(true);
+    }
+
+    function setupStockTypeSplit() {
+        $("#stockTypeSplitToggle")?.addEventListener("change", async e => {
+            if (e.target.checked) {
+                // Re-checking after an in-page uncheck restores whatever was
+                // already classified/confirmed instead of re-running
+                // classification and losing overrides/segment configs —
+                // only classify fresh when nothing is cached yet.
+                if (stockTypeRows.length) {
+                    restoreStockTypeSplitUI();
+                } else {
+                    const ok = await runStockTypeClassification();
+                    if (!ok) e.target.checked = false;
+                }
+            } else {
+                // Hides the panel only — stockTypeRows/overrides/
+                // segmentConfigs/stockTypeConfirmed are deliberately left
+                // intact so re-checking this box, still on this page,
+                // restores rather than re-classifies.
+                stockTypeSplitEnabled = false;
+                hideSegmentTabs(true);
+                const confirmBox = $("#stockTypeConfirmBox");
+                if (confirmBox) confirmBox.style.display = "none";
+            }
+        });
+        $("#btnCancelStockTypeSplit")?.addEventListener("click", () => {
+            resetStockTypeSplit();
+        });
+        $("#btnDownloadStockTypeSplit")?.addEventListener("click", () => {
+            window.location.href = "/api/download_stock_type_classification";
+        });
+        setupSegmentTabs();
+    }
+
+    // Auto-advances Step 2's Bulk/Parcel split — no manual "Confirm" click.
+    // Called from renderStockTypeSummary() after every classification load,
+    // override, or undo: once every row has a Bulk/Parcel answer, shows the
+    // segment tabs on its own; if an Undo puts any row back to Needs Input,
+    // hides them again (segmentConfigs preserved — see hideSegmentTabs).
+    function updateStockTypeSegmentVisibility() {
+        if (!stockTypeRows.length) return;
+        const stillMissing = stockTypeRows.some(row => effectiveStockType(row) === "MISSING_DATA");
+        const confirmedBadge = $("#stockTypeConfirmedBadge");
+        if (!stillMissing) {
+            if (confirmedBadge) confirmedBadge.style.display = "block";
+            if (!stockTypeConfirmed) {
+                stockTypeSplitEnabled = true;
+                stockTypeConfirmed = true;
+                showSegmentTabs();
+            }
+        } else {
+            if (confirmedBadge) confirmedBadge.style.display = "none";
+            if (stockTypeConfirmed) {
+                stockTypeConfirmed = false;
+                hideSegmentTabs(true);
+            }
+        }
+    }
+
+    // ── Bulk/Parcel segment tabs ────────────────────────────────────
+    // The strategy grid/params below are shared DOM — switching tabs saves
+    // the outgoing segment's live configuration into segmentConfigs and
+    // loads the incoming segment's saved configuration (or a blank slate)
+    // onto those same controls, rather than duplicating that whole card.
+
+    // preserveState: true re-shows the tabs with whatever's already saved in
+    // segmentConfigs/currentSegment (an in-page uncheck→recheck of the split
+    // toggle — see restoreStockTypeSplitUI) instead of starting both segments
+    // over blank, which is what a genuinely fresh confirm still does.
+    function showSegmentTabs(preserveState = false) {
+        if (!preserveState) {
+            segmentConfigs = { BULK: null, PARCEL: null };
+            currentSegment = "BULK";
+        }
+        const tabs = $("#stockTypeSegmentTabs");
+        if (tabs) tabs.style.display = "block";
+        // The split only ever applies to DC Selection — hide the Vendor-
+        // Aligned/DC Selection choice entirely so there's nothing to pick
+        // per segment; applySegmentConfig forces DC_SELECTION directly.
+        const grid = $("#strategyGrid");
+        if (grid) grid.style.display = "none";
+        applySegmentConfig(preserveState ? segmentConfigs[currentSegment] : null);
+        renderSegmentTabs();
+    }
+
+    // preserveState: true just hides the DOM without wiping segmentConfigs —
+    // used when the split toggle is unchecked but the user might still flip
+    // it back on this same page, so their per-segment strategy work isn't
+    // lost. A real reset (new upload, Cancel, Follow Last Year) always calls
+    // this with no argument.
+    function hideSegmentTabs(preserveState = false) {
+        if (!preserveState) segmentConfigs = { BULK: null, PARCEL: null };
+        const tabs = $("#stockTypeSegmentTabs");
+        if (tabs) tabs.style.display = "none";
+        const grid = $("#strategyGrid");
+        if (grid) grid.style.display = "grid";
+    }
+
+    function renderSegmentTabs() {
+        const counts = { BULK: 0, PARCEL: 0 };
+        for (const row of stockTypeRows) {
+            const t = effectiveStockType(row);
+            if (counts[t] !== undefined) counts[t]++;
+        }
+
+        $$(".segment-tab").forEach(btn => {
+            btn.classList.toggle("active", btn.dataset.segment === currentSegment);
+        });
+
+        const countEl = { BULK: $("#segmentTabCountBulk"), PARCEL: $("#segmentTabCountParcel") };
+        const statusEl = { BULK: $("#segmentTabStatusBulk"), PARCEL: $("#segmentTabStatusParcel") };
+        for (const seg of ["BULK", "PARCEL"]) {
+            if (countEl[seg]) countEl[seg].textContent = `${counts[seg].toLocaleString()} SKU(s)`;
+            if (statusEl[seg]) {
+                const configured = !!segmentConfigs[seg];
+                statusEl[seg].textContent = configured ? "Configured" : "Not configured";
+                statusEl[seg].classList.toggle("done", configured);
+            }
+        }
+
+        const banner = $("#segmentActiveBanner");
+        if (banner) {
+            const label = currentSegment === "BULK" ? "📦 Bulk" : "📮 Parcel";
+            banner.innerHTML = `<i class="fas fa-arrow-down"></i> Now configuring: <u>${label} SKUs</u> `
+                + `(${counts[currentSegment].toLocaleString()} items) — the strategy below applies only to this segment`;
+        }
+    }
+
+    // Reads the shared DC Selection controls into a plain config object.
+    // The Bulk/Parcel split only ever applies to DC Selection — a vendor's
+    // DC assignment is driven by who the supplier is, not by whether their
+    // SKUs ship bulk or parcel, so Vendor-Aligned is never segmented and
+    // isn't handled here. Only the "manual DC count" path is captured — see
+    // segmentConfigs' declaration for why.
+    function captureCurrentSegmentConfig() {
+        if (selectedStrategy !== "DC_SELECTION") return null;
+        return {
+            strategy: "DC_SELECTION",
+            dcCounts: getSelectedDcCounts("#dcToggleGrid"),
+            dcInclusions: [...dcInclusions],
+            dcExclusions: [...dcExclusions],
+            campusPairs: [...campusPairs],
+        };
+    }
+
+    // Writes a saved (or null/blank) DC Selection config back onto the
+    // shared controls — the mirror image of captureCurrentSegmentConfig,
+    // using the same click-driven DOM manipulation _applyLastYearStrategyBody
+    // already established for restoring DC Selection's controls
+    // programmatically. Always forces DC_SELECTION (clicking its radio
+    // itself) since that's the only strategy a segment can use — see
+    // showSegmentTabs, which hides the Vendor-Aligned/DC Selection choice
+    // entirely while segment tabs are active.
+    function applySegmentConfig(config) {
+        applyingLastYearStrategy = true; // reuse the same "don't uncheck Follow Last Year" guard
+        try {
+            $("#paramsVendor").style.display = "none";
+            dcInclusions = [];
+            dcExclusions = [];
+            campusPairs = [];
+            $$("#dcToggleGrid .dc-toggle-btn").forEach(b => b.classList.remove("active"));
+            updateDcSelectionCountBadge();
+            $("#btnCampusNo")?.click();
+            $("#btnDcFilterNo")?.click();
+
+            const radio = document.querySelector('input[name="strategy"][value="DC_SELECTION"]');
+            if (radio && !radio.checked) { radio.checked = true; radio.dispatchEvent(new Event("change")); }
+            $("#strategyParams").style.display = "block";
+
+            if (!config) return;
+
+            $("#btnDcKnow")?.click();
+            $$("#dcToggleGrid .dc-toggle-btn").forEach(b => {
+                b.classList.toggle("active", (config.dcCounts || []).includes(parseInt(b.dataset.dcCount)));
+            });
+            updateDcSelectionCountBadge();
+            campusPairs = [...(config.campusPairs || [])];
+            if (campusPairs.length) {
+                if ($("#campusSelection")?.style.display === "none") $("#btnCampusYes")?.click();
+                if (campusPairs.includes("perris") !== !!$("#btnCampusPerris")?.classList.contains("active")) $("#btnCampusPerris")?.click();
+                if (campusPairs.includes("locust_grove") !== !!$("#btnCampusLG")?.classList.contains("active")) $("#btnCampusLG")?.click();
+            }
+            const inclusions = config.dcInclusions || [];
+            const exclusions = config.dcExclusions || [];
+            if (inclusions.length || exclusions.length) {
+                if ($("#dcFilterSelection")?.style.display === "none") $("#btnDcFilterYes")?.click();
+                buildDcFilterLists();
+                $$(".dc-filter-toggle-btn").forEach(btn => {
+                    const dc = parseInt(btn.dataset.dc);
+                    btn.dataset.state = inclusions.includes(dc) ? "include" : exclusions.includes(dc) ? "exclude" : "none";
+                });
+                updateDcFilters();
+            }
+        } finally {
+            applyingLastYearStrategy = false;
+        }
+    }
+
+    function switchSegment(nextSegment) {
+        if (nextSegment === currentSegment) return;
+        segmentConfigs[currentSegment] = captureCurrentSegmentConfig();
+        currentSegment = nextSegment;
+        applySegmentConfig(segmentConfigs[currentSegment]);
+        renderSegmentTabs();
+    }
+
+    function setupSegmentTabs() {
+        $$(".segment-tab").forEach(btn => {
+            btn.addEventListener("click", () => switchSegment(btn.dataset.segment));
+        });
+    }
+
     // Shared commit path for Vendor-Aligned: writes the upload to
     // EVENTS_SKU_LIST (if not already done) and submits SKU-level rows into
     // DFC_COST_MODEL_SUBMISSION. Used by the explicit "Confirm Vendor
     // Strategies" button and by Step 2's Next button when the user proceeds
     // without clicking Confirm themselves. Returns whether it succeeded.
     async function confirmVendorStrategy() {
+        // Same guard as the Next button (setupInsert) — this is also
+        // reachable directly via "Confirm Vendor Strategies," a separate
+        // entry point that would otherwise skip the check entirely.
+        if (!eventName) {
+            toast("Please upload and validate a SKU list before continuing", "error");
+            return false;
+        }
         if (!dataInserted) {
             const inserted = await doInsert(false);
             if (!inserted) return false;
         }
-        const submitted = await submitCostModel();
-        if (!submitted) return false;
+        // doInsert() already confirmed the row data AND this vendor
+        // selection match what's on file — resubmitting would write back
+        // the exact same DFC_COST_MODEL_SUBMISSION/EVENTS_SKU_LIST values,
+        // so skip it instead of redoing that BigQuery work for nothing.
+        if (skipResubmitBecauseUnchanged) {
+            skipResubmitBecauseUnchanged = false;
+        } else {
+            const submitted = await submitCostModel();
+            if (!submitted) return false;
+        }
         vendorStrategyConfirmed = true;
         $("#btnConfirmVendorStrategy").disabled = true;
         $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
@@ -1123,13 +2082,50 @@
         return true;
     }
 
-    async function doInsert(overwrite) {
+    // Asks the backend whether replacing the existing EVENTS_SKU_LIST data
+    // for this event would actually change anything — same row data AND same
+    // DC/vendor selection already on file — so doInsert can skip the whole
+    // replace/resubmit cycle instead of redoing real BigQuery work for
+    // something that changes nothing. Any error/uncertainty resolves to
+    // false (caller falls back to its normal replace flow), never a hard
+    // failure of its own.
+    async function checkUploadUnchanged() {
+        try {
+            const result = await api("/api/check_upload_unchanged", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    container_divisor: getContainerDivisor(),
+                    vendor_matches: vendorMatches,
+                    dc_inclusions: dcInclusions,
+                    dc_exclusions: dcExclusions,
+                    campus_pairs: campusPairs,
+                }),
+            });
+            return !!result.unchanged;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // recomputeMaturity only matters when overwrite is true: false (default)
+    // tells the backend to pin every SKU's THD-vs-sister maturity decision to
+    // whatever was already on file for this event, so a plain resubmit of the
+    // same list stays aligned with anything already priced under an existing
+    // RUN_ID. Pass true instead when the upload is a genuinely new baseline
+    // and today's SKU maturity should be recomputed fresh (see the prompt in
+    // the "exists" branch below).
+    async function doInsert(overwrite, recomputeMaturity = false) {
+        // Reset here, not just where it's set true below — so a stale true
+        // from an earlier, unrelated doInsert() call can never leak into
+        // this one's result if this call doesn't hit the "unchanged" path.
+        skipResubmitBecauseUnchanged = false;
         showLoading("Inserting into BigQuery…");
         try {
             const result = await api("/api/insert", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ container_divisor: getContainerDivisor(), overwrite }),
+                body: JSON.stringify({ container_divisor: getContainerDivisor(), overwrite, recompute_maturity: recomputeMaturity }),
             });
             if (result.success) {
                 const status = $("#autoInsertStatus");
@@ -1143,9 +2139,29 @@
                 dataInserted = true;
                 return true;
             } else if (result.exists) {
+                showLoading("Checking for changes…");
+                const unchanged = await checkUploadUnchanged();
                 hideLoading();
+                if (unchanged) {
+                    dataInserted = true;
+                    skipResubmitBecauseUnchanged = true;
+                    toast("No changes detected — nothing to update", "info");
+                    return true;
+                }
                 if (confirm(`${result.message}\n\nReplace the existing data?`)) {
-                    return await doInsert(true);
+                    // A second, separate choice: whether the replacement should
+                    // stay aligned with anything already run for this event (the
+                    // safe default — OK here) or recompute each SKU's THD-vs-
+                    // sister maturity fresh against today's date because this
+                    // upload is intentionally a new baseline (Cancel here).
+                    const recompute = !confirm(
+                        `Keep this replacement aligned with any existing catalog run for this event?\n\n` +
+                        `OK (recommended) reuses each SKU's already-decided THD-vs-sister maturity, so it still ` +
+                        `matches whatever a prior RUN_ID already priced.\n\n` +
+                        `Cancel recomputes maturity fresh against today's date instead — only do this if the SKU ` +
+                        `list has genuinely changed and you want a new baseline / a brand-new RUN_ID to reflect it.`
+                    );
+                    return await doInsert(true, recompute);
                 }
                 toast("Insert cancelled — existing data left in place", "error");
                 return false;
@@ -1193,6 +2209,8 @@
             if (result.already_submitted) {
                 $("#btnSubmitCostModel").disabled = true;
                 $("#btnDeleteVendorCostModel").style.display = "inline-flex";
+                $("#btnDeleteCostModel").style.display = "inline-flex";
+                $("#btnDeleteDcCostModel").style.display = "inline-flex";
             }
 
             // Pie chart: count by type
@@ -1345,7 +2363,7 @@
     function setupAsmtTool() {
         $("#btnSubmitCostModel")?.addEventListener("click", submitCostModel);
         $("#btnDownloadCostModel")?.addEventListener("click", downloadCostModelCsv);
-        $("#btnDeleteCostModel")?.addEventListener("click", () => deleteCostModelSubmission());
+        $("#btnDeleteCostModel")?.addEventListener("click", replacePreviousUpload);
         $("#btnRunAsmtTool")?.addEventListener("click", startObcPipeline);
     }
 
@@ -1380,9 +2398,10 @@
                 <i class="fas fa-check-circle"></i> Assortment tool complete${runLine}.
             </div>`;
             // Auto-populate Run ID as soon as it's known — regardless of strategy,
-            // since DC Selection's "Use one DC count for the entire group instead"
-            // (singleDcGroupToggle) needs Run ID/SKU Group at Step 6's "Determine
-            // Assortment IDs" just as much as anything vendor-aligned does. Only the
+            // since DC Selection's "Single DC Count — determine for me"
+            // (singleDcCountAutoSelected) needs Run ID/SKU Group at Step 6's
+            // "Determine Assortment IDs" just as much as anything vendor-aligned
+            // does. Only the
             // DC-eligibility check below stays VENDOR_ALIGNED-only (see
             // check_vendor_dc_eligibility's own docstring) — that's a check against
             // DFC_COST_MODEL_SUBMISSION's per-vendor dc_inclusions, meaningless for
@@ -1442,25 +2461,52 @@
     async function submitCostModel() {
         showLoading("Submitting to DFC Cost Model…");
         try {
-            // matchVendorStrategy() shows/hides its own loading state when it
-            // actually has to run — restore ours afterward so the overlay
-            // doesn't drop out from under the submit that's still pending.
-            await ensureVendorMatchesFresh();
-            showLoading("Submitting to DFC Cost Model…");
-            const resp = await fetch("/api/submit_cost_model", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
+            let body;
+            if (stockTypeSplitEnabled && stockTypeConfirmed) {
+                // The Bulk/Parcel split only ever applies to DC Selection (a
+                // vendor's DC assignment is driven by who the supplier is,
+                // not by whether their SKUs ship bulk or parcel) — every
+                // segment here is a DC Selection config, never Vendor-Aligned.
+                const segments = ["BULK", "PARCEL"]
+                    .filter(segKey => segmentConfigs[segKey])
+                    .map(segKey => ({
+                        stock_type: segKey,
+                        dc_counts: segmentConfigs[segKey].dcCounts,
+                        dc_inclusions: segmentConfigs[segKey].dcInclusions,
+                        dc_exclusions: segmentConfigs[segKey].dcExclusions,
+                        campus_pairs: segmentConfigs[segKey].campusPairs,
+                    }));
+                if (!segments.length) throw new Error("Configure a strategy for at least one segment (Bulk or Parcel) before submitting");
+                showLoading("Submitting to DFC Cost Model…");
+                body = { event_name: eventName, segments };
+            } else {
+                // matchVendorStrategy() shows/hides its own loading state when it
+                // actually has to run — restore ours afterward so the overlay
+                // doesn't drop out from under the submit that's still pending.
+                await ensureVendorMatchesFresh();
+                showLoading("Submitting to DFC Cost Model…");
+                // DC Selection's chosen DC count(s) — same manual-vs-"determine for
+                // me" resolution used elsewhere (getSingleDcCountCap,
+                // determineAssortment). Left empty for a mode that hasn't resolved
+                // to a concrete count yet (single-count lookup, or an import's
+                // dynamic per-factory cascading), same as before this existed.
+                const dcCountsForSubmit = (singleDcCountAutoSelected || (multiDcDynamicSelected && includesImports))
+                    ? []
+                    : ($("#dcManual")?.style.display !== "none"
+                        ? getSelectedDcCounts("#dcToggleGrid")
+                        : [...$$('#dcCountChecks input:checked')].map(c => parseInt(c.dataset.dcCount)));
                 // vendor_matches carries Step 2's resolved DC assignments (and
                 // any per-SKU overrides) so the submission can populate
                 // target_dc_count/dc_inclusions/dc_exclusions instead of
                 // leaving them null. Empty for a non-vendor-aligned strategy.
                 // For DC Selection (Single-DC/Multi-DC Count), there's no
                 // per-vendor resolution to send instead — dc_inclusions/
-                // dc_exclusions are just Step 2's event-wide DC filter
-                // choices, applied identically to every SKU row.
-                body: JSON.stringify({
+                // dc_exclusions/dc_counts are just Step 2's event-wide DC
+                // filter/count choices, applied identically to every SKU row.
+                body = {
                     event_name: eventName,
                     vendor_matches: vendorMatches,
+                    dc_counts: dcCountsForSubmit,
                     dc_inclusions: dcInclusions,
                     dc_exclusions: dcExclusions,
                     // DC Selection's "Treat Bulk Counterparts The Same" choice
@@ -1468,18 +2514,31 @@
                     // are toggled on) — only meaningful for that strategy;
                     // the backend ignores it for a vendor-aligned submission.
                     campus_pairs: campusPairs,
-                }),
+                };
+            }
+            const resp = await fetch("/api/submit_cost_model", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
             });
             const result = await resp.json();
-            if (!resp.ok || result.error) throw new Error(result.error || "Submission failed");
+            if (!resp.ok || result.error) {
+                const err = new Error(result.error || "Submission failed");
+                err.conflicts = result.conflicts;
+                throw err;
+            }
 
+            renderSubmissionConflicts([]); // clear any earlier conflict panel now that this succeeded
             const passBadge = `<div class="validation-badge badge-pass" style="font-size:0.95rem">
                 <i class="fas fa-check-circle"></i> ${result.message}
             </div>`;
             $("#costModelStatus").innerHTML = passBadge;
             if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
+            if ($("#dcSelectionSubmitStatus")) $("#dcSelectionSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = true;
             $("#btnDeleteVendorCostModel").style.display = "none";
+            $("#btnDeleteCostModel").style.display = "none";
+            $("#btnDeleteDcCostModel").style.display = "none";
             $("#btnRunAsmtTool").style.display = "inline-flex";
             $("#btnRunAsmtTool").disabled = false;
             toast("Cost model submission complete", "success");
@@ -1495,15 +2554,77 @@
             </div>`;
             $("#costModelStatus").innerHTML = failBadge;
             if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
-            // Surface the delete option inline wherever this error happened,
-            // so the user isn't forced to hunt for it in a different step.
+            if ($("#dcSelectionSubmitStatus")) $("#dcSelectionSubmitStatus").innerHTML = failBadge;
+            // Surface the replace option inline wherever this error happened
+            // (Step 2's vendor-aligned or DC Selection confirm box, or Step
+            // 6's generic Submit button), so the user isn't forced to hunt
+            // for it in a different step.
             const alreadySubmitted = /already been submitted/i.test(e.message);
             $("#btnDeleteVendorCostModel").style.display = alreadySubmitted ? "inline-flex" : "none";
+            $("#btnDeleteCostModel").style.display = alreadySubmitted ? "inline-flex" : "none";
+            $("#btnDeleteDcCostModel").style.display = alreadySubmitted ? "inline-flex" : "none";
+            // Cross-segment SKU_NBR conflicts (see _find_cross_segment_sku_
+            // conflicts) come with the exact rows responsible — give the user
+            // something to click instead of just naming the error.
+            renderSubmissionConflicts(e.conflicts || []);
             toast("Submission failed: " + e.message, "error");
             return false;
         } finally {
             hideLoading();
         }
+    }
+
+    // Renders the rows behind a cross-segment SKU_NBR conflict (see
+    // /api/submit_cost_model's 409 "conflicts" payload) with the same
+    // Bulk/Parcel override buttons as the classification panel's own
+    // MISSING_DATA table — reuses /api/override_stock_type directly, since
+    // these are ordinary rows the user just needs to nudge into agreement.
+    function renderSubmissionConflicts(rows) {
+        const box = $("#submissionConflictBox");
+        if (!box) return;
+        if (!rows.length) { box.style.display = "none"; box.innerHTML = ""; return; }
+        box.style.display = "block";
+        box.innerHTML = `
+            <div style="padding:14px 16px;border:1.5px solid #dc3545;border-radius:8px;background:#fff5f5">
+                <strong style="color:#dc3545"><i class="fas fa-triangle-exclamation"></i> Submission conflict</strong>
+                <p style="margin:6px 0 10px;font-size:.85rem;color:#555">
+                    These rows resolved to the same SKU_NBR in both Bulk and Parcel after BigQuery's own
+                    maturity check. Pick one category for each, then click Retry Submission below.
+                </p>
+                <div id="submissionConflictTable"></div>
+                <button type="button" class="btn btn-sm btn-primary" id="btnRetrySubmission" style="margin-top:10px">
+                    <i class="fas fa-rotate"></i> Retry Submission
+                </button>
+            </div>
+        `;
+        const table = $("#submissionConflictTable");
+        table.innerHTML = rows.map(row => `
+            <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #eee;font-size:.82rem">
+                <div style="flex:1">
+                    <strong>${row.thd_sku_nbr ?? row.sister_sku_nbr ?? "—"}</strong>
+                    ${row.sku_desc ? `— ${row.sku_desc}` : ""}
+                    <div style="color:#856404;font-size:.75rem">Currently ${row.stock_type} — resolves to SKU_NBR ${row.conflict_sku_nbr}</div>
+                </div>
+                <button type="button" class="btn btn-sm btn-secondary submission-conflict-override-btn" data-thd-key="${row.thd_key}" data-stock-type="BULK">Bulk</button>
+                <button type="button" class="btn btn-sm btn-secondary submission-conflict-override-btn" data-thd-key="${row.thd_key}" data-stock-type="PARCEL">Parcel</button>
+                <button type="button" class="btn btn-sm btn-secondary submission-conflict-undo-btn" data-thd-key="${row.thd_key}">
+                    <i class="fas fa-rotate-left"></i> Undo
+                </button>
+            </div>
+        `).join("");
+        table.querySelectorAll(".submission-conflict-override-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                await setStockTypeOverride(btn.dataset.thdKey, btn.dataset.stockType);
+                btn.closest("div").style.opacity = "0.5";
+            });
+        });
+        table.querySelectorAll(".submission-conflict-undo-btn").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                await undoStockTypeOverride(btn.dataset.thdKey);
+                btn.closest("div").style.opacity = "1";
+            });
+        });
+        $("#btnRetrySubmission")?.addEventListener("click", () => $("#btnGoInsert")?.click());
     }
 
     // `silent` skips this function's own confirm dialog and success toast —
@@ -1526,10 +2647,14 @@
             </div>`;
             $("#costModelStatus").innerHTML = passBadge;
             if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = passBadge;
+            if ($("#dcSelectionSubmitStatus")) $("#dcSelectionSubmitStatus").innerHTML = passBadge;
             $("#btnSubmitCostModel").disabled = false;
             $("#btnDeleteVendorCostModel").style.display = "none";
+            $("#btnDeleteCostModel").style.display = "none";
+            $("#btnDeleteDcCostModel").style.display = "none";
             // Let the user resubmit through the vendor-aligned confirm flow too.
             vendorStrategyConfirmed = false;
+            dcSelectionCostModelSubmitted = false;
             if ($("#btnConfirmVendorStrategy")) {
                 $("#btnConfirmVendorStrategy").disabled = false;
                 $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check"></i> Confirm Vendor Strategies';
@@ -1542,6 +2667,7 @@
             </div>`;
             $("#costModelStatus").innerHTML = failBadge;
             if ($("#vendorSubmitStatus")) $("#vendorSubmitStatus").innerHTML = failBadge;
+            if ($("#dcSelectionSubmitStatus")) $("#dcSelectionSubmitStatus").innerHTML = failBadge;
             toast("Delete failed: " + e.message, "error");
             return false;
         } finally {
@@ -1562,6 +2688,7 @@
         const submitted = await submitCostModel();
         if (submitted) {
             vendorStrategyConfirmed = true;
+            dcSelectionCostModelSubmitted = true;
             $("#btnConfirmVendorStrategy").disabled = true;
             $("#btnConfirmVendorStrategy").innerHTML = '<i class="fas fa-check-circle"></i> Confirmed';
             toast("Previous submission replaced with current upload", "success");
@@ -1600,25 +2727,124 @@
             if (badge) badge.innerHTML = "";
             if (cascadingGroup) cascadingGroup.style.display = "none";
         } else if (selected.length === 1) {
-            if (badge) badge.innerHTML = `<div style="${_DC_COUNT_NOTICE_STYLE}"><i class="fas fa-info-circle" style="color:#155724"></i> <strong>1 DC Count (${selected[0]}) selected</strong> — Single DC Strategy</div>`;
+            // Hidden for now, per request — commented out rather than removed.
+            // if (badge) badge.innerHTML = `<div style="${_DC_COUNT_NOTICE_STYLE}"><i class="fas fa-info-circle" style="color:#155724"></i> <strong>1 DC Count (${selected[0]}) selected</strong> — Single DC Strategy</div>`;
+            if (badge) badge.innerHTML = "";
             if (cascadingGroup) cascadingGroup.style.display = "none";
         } else {
-            if (badge) badge.innerHTML = `<div style="${_DC_COUNT_NOTICE_STYLE}"><i class="fas fa-info-circle" style="color:#155724"></i> <strong>${selected.length} DC Counts (${selected.join(", ")}) selected</strong> — Multi DC Strategy</div>`;
+            // Hidden for now, per request — commented out rather than removed.
+            // if (badge) badge.innerHTML = `<div style="${_DC_COUNT_NOTICE_STYLE}"><i class="fas fa-info-circle" style="color:#155724"></i> <strong>${selected.length} DC Counts (${selected.join(", ")}) selected</strong> — Multi DC Strategy</div>`;
+            if (badge) badge.innerHTML = "";
             if (cascadingGroup) cascadingGroup.style.display = "block";
         }
+        renderLowVolumeAlert();
     }
 
     function getSelectedDcCounts(containerId) {
         return [...$(containerId).querySelectorAll(".dc-toggle-btn.active")].map(b => parseInt(b.dataset.dcCount));
     }
 
+    // Live counterpart to the old click-time-only check: re-evaluates every
+    // time the DC count toggles change (via updateDcSelectionCountBadge above)
+    // instead of waiting for "Determine Assortment IDs" on Step 3 to reveal
+    // it — this only ever applies to import events (window._factoryDist is
+    // only populated when the upload had FACTORY_ID/cube data; see
+    // validate_upload in validators.py), so a domestic event never shows it,
+    // which is correct, not a bug. No Proceed/Cancel gate anymore: this is
+    // just a live, adjustable status panel now that it lives on Step 2
+    // alongside the rest of the DC config — determineAssortment() reads
+    // whatever #minContainersInput/#lowVolFallbackDc currently hold (or the
+    // prior hardcoded defaults, 5 and 2, if the panel was never shown).
+    // Marks (or clears) the low-volume factories' own bars/dots in the
+    // Factory Distribution chart above, in the same yellow used by the
+    // alert box below it — so a factory flagged as "too low for the min DC
+    // count" is visible right on the chart, not just named in a count.
+    // Matches by data-factory-id, set on each bar/dot-group when the chart
+    // is built, so this works for either renderer without re-drawing it.
+    function applyLowVolumeChartHighlight(factoryIds) {
+        const svg = $("#factoryDistChart");
+        if (!svg) return;
+        const idSet = new Set((factoryIds || []).map(String));
+        svg.querySelectorAll("[data-factory-id]").forEach(el => {
+            el.classList.toggle("chart-mark-low-vol", idSet.has(el.getAttribute("data-factory-id")));
+        });
+    }
+
+    function renderLowVolumeAlert() {
+        const alertEl = $("#lowVolumeAlert");
+        if (!alertEl) return;
+        const dynamicMode = multiDcDynamicSelected && includesImports;
+        const dist = dynamicMode ? null : window._factoryDist;
+        const dcCounts = getSelectedDcCounts("#dcToggleGrid");
+        if (!dist || !dist.length || !dcCounts.length) {
+            alertEl.style.display = "none";
+            alertEl.innerHTML = "";
+            applyLowVolumeChartHighlight([]);
+            return;
+        }
+        const divisor = getContainerDivisor();
+        const minDc = Math.min(...dcCounts);
+        // 2 is only a sensible fallback when 1 isn't itself on the table —
+        // if 1 IS one of the selected DC counts, it's already the narrowest
+        // possible strategy, so a factory too low-volume even for it has
+        // nowhere lower to fall back to than 1 itself.
+        const fallbackDefault = dcCounts.includes(1) ? 1 : 2;
+        const lowVol = dist.filter(f => (f.factory_cube || 0) / divisor < minDc);
+        if (!lowVol.length) {
+            alertEl.style.display = "none";
+            alertEl.innerHTML = "";
+            applyLowVolumeChartHighlight([]);
+            return;
+        }
+        applyLowVolumeChartHighlight(lowVol.map(f => f.factory_id));
+        // Default the adjustable threshold to the highest container volume
+        // actually found among the flagged factories (not the bare min DC
+        // count) — accepting the default then captures exactly this set,
+        // no more and no fewer, instead of an arbitrary round number that
+        // could sweep in extra factories or miss ones just under it.
+        const threshold = Math.round(Math.max(...lowVol.map(f => (f.factory_cube || 0) / divisor)) * 100) / 100;
+        alertEl.innerHTML = `
+            <div class="validation-badge" style="display:block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:8px;padding:10px 14px;font-size:0.8rem">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <strong style="text-transform:uppercase">${lowVol.length} of ${dist.length} factories produce fewer than the minimum selected DC count (${minDc}).</strong>
+                </div>
+                <div style="margin-bottom:8px">
+                    Factories with fewer containers than the threshold will default to a
+                    <input type="number" id="lowVolFallbackDc" value="${fallbackDefault}" min="1" max="13" step="1" style="width:50px;padding:3px 6px;border:1px solid #ccc;border-radius:4px;font-weight:700;text-align:center">
+                    <strong>DC strategy</strong>.
+                </div>
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+                    <label style="font-weight:600;font-size:0.76rem">Adjust container threshold:</label>
+                    <input type="number" id="minContainersInput" value="${threshold}" min="0" step="0.01" style="width:60px;padding:3px 6px;border:1px solid #ccc;border-radius:4px">
+                </div>
+                <div id="lowVolSummary" style="padding:6px 10px;background:#fef9e7;border-radius:6px;font-size:0.76rem;font-style:italic">
+                    Factories that produce less than or equal to <strong>${threshold}</strong> containers will be assorted to a <strong>${fallbackDefault}</strong> DC count strategy.
+                </div>
+            </div>`;
+        alertEl.style.display = "block";
+        // Typing in either input only refreshes the summary line in place —
+        // never re-render the whole block from an "input" event, or the
+        // input being typed into would lose focus/cursor position on every
+        // keystroke. A full re-render only happens above, from a DC toggle
+        // click via updateDcSelectionCountBadge.
+        const updateSummary = () => {
+            const t = $("#minContainersInput")?.value || threshold;
+            const d = $("#lowVolFallbackDc")?.value || fallbackDefault;
+            $("#lowVolSummary").innerHTML = `Factories that produce less than or equal to <strong>${t}</strong> containers will be assorted to a <strong>${d}</strong> DC count strategy.`;
+        };
+        $("#minContainersInput").addEventListener("input", updateSummary);
+        $("#lowVolFallbackDc").addEventListener("input", updateSummary);
+    }
+
     // A single DC count picked manually or via lookup caps how many DCs can be
     // marked "include" in the DC Filter below — including more than the chosen
     // count would ask the group-run query for something impossible (e.g. count
-    // 5 with 6 required DCs). Dynamic mode (the optimizer picks the count) has
-    // no fixed count to cap against yet, so it returns null (no cap) even when
-    // "use one DC count for the entire group" is checked.
+    // 5 with 6 required DCs). Neither "determine for me" mode (single-auto's
+    // open search, or import's per-factory cascading tiers) has a fixed count
+    // to cap against yet, so both return null (no cap).
     function getSingleDcCountCap() {
+        if (singleDcCountAutoSelected) return null;
         if (multiDcDynamicSelected && includesImports) return null;
         const counts = $("#dcManual")?.style.display !== "none"
             ? getSelectedDcCounts("#dcToggleGrid")
@@ -1632,13 +2858,31 @@
         // Once a determination has run, flag any change anywhere on Step 6 as
         // "config may have changed" and relabel the button to "Redetermine" —
         // if nothing actually changed, the button just stays "Determine."
-        const markConfigDirty = () => {
+        const markConfigDirty = e => {
+            // The toggle's own "change" bubbles here too, but only after its
+            // dedicated listener below has already fully run
+            // applyLastYearStrategy() (including resetting
+            // applyingLastYearStrategy back to false) — by the time it
+            // reaches here the guard inside noteManualStrategyEdit() can no
+            // longer tell that apart from a real edit, so skip it by target
+            // instead.
+            if (e?.target?.id !== "followLastYearToggle") noteManualStrategyEdit();
             if (!lastAssortmentConfig) return; // nothing determined yet — no need
             const btn = $("#btnDetermineAsmt");
             if (btn) btn.innerHTML = '<i class="fas fa-search"></i> Redetermine Assortment IDs <i class="fas fa-arrow-right"></i>';
         };
         $("#panel-2")?.addEventListener("change", markConfigDirty);
         $("#panel-2")?.addEventListener("input", markConfigDirty);
+        // The controls above (DC count grid, campus toggles, DC filter
+        // include/exclude pills, per-supplier vendor DC buttons) are all
+        // plain <button>s toggled via classList, not real form controls — a
+        // click on one never fires "change"/"input" for markConfigDirty to
+        // catch, so it needs its own delegated listener to notice the edit.
+        $("#panel-2")?.addEventListener("click", e => {
+            if (e.target.closest(".dc-toggle-btn, .dc-filter-toggle-btn, #btnDcKnow, #btnDcNo, #btnDcSingleAuto, #btnDcMultiAuto, #btnCampusYes, #btnCampusNo, #btnDcFilterYes, #btnDcFilterNo")) {
+                noteManualStrategyEdit();
+            }
+        });
 
         // Build 1-13 toggle grid
         buildDcToggleGrid("#dcToggleGrid");
@@ -1656,7 +2900,16 @@
                 // Hide all param groups then show relevant ones
                 $$(".param-group").forEach(g => g.style.display = "none");
 
+                // The Bulk/Parcel split only ever applies to DC Selection (see
+                // resetStockTypeSplit/showSegmentTabs) — hide the opt-in
+                // checkbox entirely for Vendor-Aligned, and turn the whole
+                // feature off if it was already active, since it no longer
+                // means anything for this strategy.
+                const stockTypeBox = $("#stockTypeSplitBox");
+
                 if (stratVal === "VENDOR_ALIGNED") {
+                    if (stockTypeBox) stockTypeBox.style.display = "none";
+                    if (stockTypeSplitEnabled || $("#stockTypeSplitToggle")?.checked) resetStockTypeSplit();
                     $("#paramsVendor").style.display = "block";
                     if ($("#paramsCascading")) $("#paramsCascading").style.display = "none";
                     $("#paramsCampus").style.display = "none";
@@ -1678,6 +2931,7 @@
                     }
                 } else if (stratVal === "DC_SELECTION" || stratVal === "SINGLE_DC" || stratVal === "MULTI_DC") {
                     selectedStrategy = "DC_SELECTION";
+                    if (stockTypeBox) stockTypeBox.style.display = "block";
                     $("#paramsDcSelection").style.display = "block";
                     syncIncludesImportsFromServer();
                     $("#btnDcKnow")?.click();
@@ -1687,39 +2941,63 @@
             });
         });
 
-        // DC Selection: know vs lookup
-        $("#btnDcKnow")?.addEventListener("click", () => {
+        // DC Selection: know vs don't know. "No" doesn't commit to anything by
+        // itself — it just reveals the Single/Multi-DC Count fork below, since
+        // those two "determine for me" paths need genuinely different handling
+        // (single: one open group-run query; multi: each strategy's own
+        // existing "determine for me" behavior).
+        function resetDcSelectionMode() {
             multiDcDynamicSelected = false;
+            singleDcCountAutoSelected = false;
             singleDcGroupChoice = null;
+            $("#dcNoKnowChoice").style.display = "none";
+            $("#dcManual").style.display = "none";
+            $("#dcSingleAuto").style.display = "none";
+            $("#dcMultiAuto").style.display = "none";
+            $("#dcMultiAutoImport").style.display = "none";
+            $("#dcMultiAutoDomestic").style.display = "none";
+            if ($("#paramsCascading")) $("#paramsCascading").style.display = "none";
+            // Tied to the manual toggle grid's own selection — irrelevant
+            // (and, once hidden, stale) in every other DC-count mode.
+            const lowVolEl = $("#lowVolumeAlert");
+            if (lowVolEl) { lowVolEl.style.display = "none"; lowVolEl.innerHTML = ""; }
+        }
+
+        $("#btnDcKnow")?.addEventListener("click", () => {
+            resetDcSelectionMode();
+            $("#btnDcKnow")?.classList.add("active");
+            $("#btnDcNo")?.classList.remove("active");
             $("#dcManual").style.display = "block";
-            $("#dcLookup").style.display = "none";
-            $("#dcDynamic").style.display = "none";
             updateDcSelectionCountBadge();
         });
 
-        $("#singleDcGroupToggle")?.addEventListener("change", (e) => {
-            // Run ID / SKU Group aren't filled in yet at this point in the wizard
-            // (they're set later, at the Run Allocation step) — so this can only
-            // record intent here. The actual lookup happens in determineAssortment()
-            // at submit time, once those fields are guaranteed to be populated.
-            singleDcGroupChoice = null;
-            const resultEl = $("#singleDcGroupResult");
-            if (resultEl) {
-                resultEl.style.display = e.target.checked ? "block" : "none";
-                if (e.target.checked) {
-                    resultEl.innerHTML = `<div class="validation-badge" style="display:block">
-                        <i class="fas fa-info-circle"></i> The lowest-expense DC count will be picked automatically
-                        when you click "Determine Assortment IDs."
-                    </div>`;
-                }
-            }
+        $("#btnDcNo")?.addEventListener("click", () => {
+            resetDcSelectionMode();
+            $("#btnDcNo")?.classList.add("active");
+            $("#btnDcKnow")?.classList.remove("active");
+            $$("#dcToggleGrid .dc-toggle-btn").forEach(b => b.classList.remove("active"));
+            updateDcSelectionCountBadge();
+            $("#dcNoKnowChoice").style.display = "block";
         });
 
-        $("#btnDcLookup")?.addEventListener("click", () => {
-            multiDcDynamicSelected = includesImports;
-            $("#dcManual").style.display = "none";
-            $("#dcLookup").style.display = includesImports ? "none" : "block";
-            $("#dcDynamic").style.display = includesImports ? "block" : "none";
+        $("#btnDcSingleAuto")?.addEventListener("click", () => {
+            resetDcSelectionMode();
+            singleDcCountAutoSelected = true;
+            $("#btnDcSingleAuto")?.classList.add("active");
+            $("#btnDcMultiAuto")?.classList.remove("active");
+            $("#dcNoKnowChoice").style.display = "block";
+            $("#dcSingleAuto").style.display = "block";
+        });
+
+        $("#btnDcMultiAuto")?.addEventListener("click", () => {
+            resetDcSelectionMode();
+            multiDcDynamicSelected = true;
+            $("#btnDcMultiAuto")?.classList.add("active");
+            $("#btnDcSingleAuto")?.classList.remove("active");
+            $("#dcNoKnowChoice").style.display = "block";
+            $("#dcMultiAuto").style.display = "block";
+            $("#dcMultiAutoImport").style.display = includesImports ? "block" : "none";
+            $("#dcMultiAutoDomestic").style.display = includesImports ? "none" : "block";
             if (includesImports && $("#paramsCascading")) {
                 $("#paramsCascading").style.display = "block";
             }
@@ -1734,6 +3012,7 @@
         // the user proceeds without clicking Confirm themselves.
         $("#btnConfirmVendorStrategy")?.addEventListener("click", confirmVendorStrategy);
         $("#btnDeleteVendorCostModel")?.addEventListener("click", replacePreviousUpload);
+        $("#btnDeleteDcCostModel")?.addEventListener("click", replacePreviousUpload);
 
         // Add Vendor Strategy — writes a new row straight into
         // VENDOR_ALIGNED_STRATEGY (ASMT_ID left null; it's only known once
@@ -1765,11 +3044,18 @@
         // once the user's entered it here in Step 3, not back on Step 2.
         $("#btnCheckDcEligibility")?.addEventListener("click", loadDcEligibility);
 
+        // Problem SKU check (MULTI_DC) — Step 7/Assortment ID Results.
+        $("#btnCheckProblemSkus")?.addEventListener("click", loadProblemSkus);
+
         // Campus pairing
         $("#btnCampusYes")?.addEventListener("click", () => {
+            $("#btnCampusYes")?.classList.add("active");
+            $("#btnCampusNo")?.classList.remove("active");
             $("#campusSelection").style.display = "block";
         });
         $("#btnCampusNo")?.addEventListener("click", () => {
+            $("#btnCampusNo")?.classList.add("active");
+            $("#btnCampusYes")?.classList.remove("active");
             $("#campusSelection").style.display = "none";
             // Deactivate both buttons
             $("#btnCampusPerris")?.classList.remove("active");
@@ -1785,10 +3071,14 @@
 
         // DC Inclusions / Exclusions
         $("#btnDcFilterYes")?.addEventListener("click", () => {
+            $("#btnDcFilterYes")?.classList.add("active");
+            $("#btnDcFilterNo")?.classList.remove("active");
             $("#dcFilterSelection").style.display = "block";
             buildDcFilterLists();
         });
         $("#btnDcFilterNo")?.addEventListener("click", () => {
+            $("#btnDcFilterNo")?.classList.add("active");
+            $("#btnDcFilterYes")?.classList.remove("active");
             $("#dcFilterSelection").style.display = "none";
             $$(".dc-filter-toggle-btn").forEach(btn => { btn.dataset.state = "none"; });
             dcInclusions = [];
@@ -1855,15 +3145,62 @@
         note.style.display = "block";
     }
 
+    // The moment the user changes anything about the current strategy — a
+    // DC count, a campus toggle, an include/exclude pill, switching strategy
+    // type entirely, a per-supplier vendor DC edit — "Follow last year's
+    // strategy?" is no longer an accurate description of what's on screen,
+    // even though whatever they just set should obviously stay. Just
+    // uncheck the box (no undo) rather than silently keep claiming a match
+    // to last year that no longer holds. A no-op while
+    // applyLastYearStrategy() is itself the one making the change.
+    function noteManualStrategyEdit() {
+        if (applyingLastYearStrategy) return;
+        const toggle = $("#followLastYearToggle");
+        if (toggle?.checked) {
+            toggle.checked = false;
+            const noteEl = $("#followLastYearNote");
+            if (noteEl) noteEl.style.display = "none";
+        }
+    }
+
     // Applies (or clears) last year's recorded strategy onto Step 2's controls.
     // Uses tier_strategy (per-factory building counts) when available — the
     // real import case this was built for — and falls back to the flat by_dc
     // rollup for domestic events, which have no per-factory tier concept.
+    // Wrapped in applyingLastYearStrategy so its own programmatic button
+    // clicks/radio flips don't trip noteManualStrategyEdit() into
+    // immediately unchecking the very toggle that's invoking it.
     function applyLastYearStrategy(enable) {
+        applyingLastYearStrategy = true;
+        try {
+            _applyLastYearStrategyBody(enable);
+        } finally {
+            applyingLastYearStrategy = false;
+        }
+    }
+
+    function _applyLastYearStrategyBody(enable) {
         const note = $("#followLastYearNote");
         const pys = lastPriorYearStrategy;
+        // Bulk/Parcel is a manual, this-event-only opt-in (see
+        // captureCurrentSegmentConfig) — last year's recorded strategy never
+        // carries a split decision, so any split left checked from before
+        // this toggle was flipped is stale and must be cleared rather than
+        // silently surviving underneath whatever this applies.
+        resetStockTypeSplit();
         if (!enable || !pys) {
             if (note) note.style.display = "none";
+            // Unchecking is a real undo, not just hiding the note — otherwise
+            // whatever this pre-fill put onto DC Count(s), Treat Bulk
+            // Counterparts, and the Include/Exclude DC filter stays behind as
+            // stale selections, and re-checking later would compound onto
+            // them instead of starting clean. Scoped to DC Selection's own
+            // controls only — a Vendor-Aligned pre-fill (matched suppliers,
+            // Step 2's own work) is left alone.
+            $$("#dcToggleGrid .dc-toggle-btn").forEach(b => b.classList.remove("active"));
+            updateDcSelectionCountBadge();
+            $("#btnCampusNo")?.click();
+            $("#btnDcFilterNo")?.click();
             return;
         }
 
@@ -1938,6 +3275,20 @@
         });
         updateDcSelectionCountBadge();
 
+        // "Cascading Assortments" (only shown when multiple DC counts are
+        // selected — see updateDcSelectionCountBadge) defaults to checked in
+        // the HTML, which was never actually verified against last year's
+        // real per-key DC sets. is_cascading is a real check: every smaller
+        // tier's DC set is a subset of the largest tier's — only override
+        // the checkbox when the backend actually computed a real answer
+        // (null for a single-count event, where this control is hidden
+        // anyway and there's nothing to test it against).
+        const cascadingToggle = $("#cascadingToggle");
+        const isCascading = pys.overall?.is_cascading;
+        if (cascadingToggle && isCascading !== null && isCascading !== undefined) {
+            cascadingToggle.checked = isCascading;
+        }
+
         if (perrisOn || lgOn) {
             if ($("#campusSelection")?.style.display === "none") $("#btnCampusYes")?.click();
             if (perrisOn !== !!$("#btnCampusPerris")?.classList.contains("active")) $("#btnCampusPerris")?.click();
@@ -1946,19 +3297,18 @@
             $("#btnCampusNo")?.click();
         }
 
-        if ($("#dcFilterSelection")?.style.display === "none") $("#btnDcFilterYes")?.click();
-        buildDcFilterLists();
-        $$(".dc-filter-toggle-btn").forEach(btn => {
-            btn.dataset.state = dcNbrs.includes(parseInt(btn.dataset.dc)) ? "include" : "none";
-        });
-        updateDcFilters();
+        // Deliberately does NOT pre-fill the Include/Exclude DC filter from
+        // last year's DC list — that filter is a hard constraint on this
+        // year's determination, and prior-year DCs (e.g. from a since-closed
+        // or reassigned building) auto-populating it silently narrowed this
+        // year's options. Leave it on "No" and let the user opt in manually.
+        $("#btnDcFilterNo")?.click();
 
         if (note) {
             const names = dcNbrs.map(n => ALL_DCS.find(d => d.nbr === n)?.name || n).join(", ");
             note.innerHTML = `<i class="fas fa-info-circle"></i> Applied ${pys.event_name} ${pys.event_year}: `
                 + `${isSingle ? "Single DC" : "Multi DC"} — ${names}`
-                + `${(perrisOn || lgOn) ? " (campus pairing on)" : ""}. `
-                + `Adjust anything below if this event's buildings have changed.`;
+                + `${(perrisOn || lgOn) ? " (campus pairing on)" : ""}.`;
             note.style.display = "block";
         }
     }
@@ -1979,6 +3329,27 @@
 
     function toggleCampusBtn(btnId) {
         const btn = $(`#${btnId}`);
+        const activating = !btn.classList.contains("active");
+        if (activating) {
+            // Turning a campus merge ON when its two DCs are already split
+            // across include/exclude would create the same contradiction
+            // the DC-filter click guard prevents going forward — catch it
+            // here too, since this is the other order the split can happen.
+            const cp = btnId === "btnCampusPerris" ? "perris" : btnId === "btnCampusLG" ? "locust_grove" : null;
+            const info = cp && CAMPUS_INFO[cp];
+            if (info) {
+                const bulkBtn = document.querySelector(`#dcFilterList .dc-filter-toggle-btn[data-dc="${info.bulk}"]`);
+                const mainBtn = document.querySelector(`#dcFilterList .dc-filter-toggle-btn[data-dc="${info.main}"]`);
+                const bulkState = bulkBtn?.dataset.state;
+                const mainState = mainBtn?.dataset.state;
+                const splitAcross = (bulkState === "include" && mainState === "exclude")
+                    || (bulkState === "exclude" && mainState === "include");
+                if (splitAcross) {
+                    toast(`${info.name} Bulk and Main are currently split between include/exclude — clear one before merging them as a campus`, "error");
+                    return;
+                }
+            }
+        }
         btn.classList.toggle("active");
         updateCampusNotice();
     }
@@ -1996,7 +3367,11 @@
             lines.push("<strong>Locust Grove:</strong> DC 6777 (Main) &amp; DC 6705 (Bulk) treated as one campus");
         }
         if (lines.length) {
-            notice.innerHTML = '<i class="fas fa-info-circle" style="color:#856404"></i> ' + lines.join("<br>");
+            // An inline separator, not a block-level divider — this reads as
+            // one wrapping line of text instead of forcing Perris and Locust
+            // Grove onto their own separate lines.
+            const divider = '&nbsp;&nbsp;|&nbsp;&nbsp;';
+            notice.innerHTML = '<i class="fas fa-info-circle" style="color:#856404"></i> ' + lines.join(divider);
             notice.style.display = "block";
         } else {
             notice.style.display = "none";
@@ -2021,7 +3396,6 @@
         { nbr: 5857, name: "Tracy" },
         { nbr: 5860, name: "Atlanta" },
         { nbr: 5882, name: "Boston" },
-        { nbr: 5938, name: "Mexico, MO" },
         { nbr: 6006, name: "Perris Bulk" },
         { nbr: 6007, name: "Perris" },
         { nbr: 6705, name: "Locust Grove Bulk" },
@@ -2064,6 +3438,20 @@
 
     const DC_FILTER_NEXT_STATE = { none: "include", include: "exclude", exclude: "none" };
 
+    // Only when campusPairs actually has that pair toggled on (Step 2's
+    // "Treat Bulk Counterparts The Same") — with no merge active, bulk and
+    // main are just two ordinary, independent DCs and can freely be split
+    // across include/exclude.
+    function getCampusSibling(dc) {
+        for (const cp of campusPairs) {
+            const info = CAMPUS_INFO[cp];
+            if (!info) continue;
+            if (info.bulk === dc) return info.main;
+            if (info.main === dc) return info.bulk;
+        }
+        return null;
+    }
+
     function buildDcFilterLists() {
         const container = $("#dcFilterList");
         if (container.children.length > 0) return; // already built
@@ -2080,6 +3468,26 @@
                 if (cap != null && dcInclusions.length >= cap) {
                     toast(`Only ${cap} DC(s) can be included — that's the selected DC count`, "error");
                     return;
+                }
+            }
+            // With that campus merged, one half in "include" and the other
+            // in "exclude" is a real contradiction, not just confusing UX —
+            // confirmed live: the assortment tool hard-fails with "no
+            // priced assortment at all" for exactly this combination, since
+            // the two states expand into the identical equivalence group.
+            // Rather than block the click and make the user clear the
+            // sibling themselves first, clear it for them and apply the
+            // click they actually made.
+            if (nextState === "include" || nextState === "exclude") {
+                const siblingDc = getCampusSibling(parseInt(btn.dataset.dc));
+                if (siblingDc != null) {
+                    const siblingBtn = container.querySelector(`.dc-filter-toggle-btn[data-dc="${siblingDc}"]`);
+                    const siblingState = siblingBtn?.dataset.state;
+                    const opposite = nextState === "include" ? "exclude" : "include";
+                    if (siblingBtn && siblingState === opposite) {
+                        siblingBtn.dataset.state = "none";
+                        toast(`DC ${siblingDc} was ${opposite}d and campus-merged with this one — cleared it so DC ${btn.dataset.dc} could be ${nextState}d`, "success");
+                    }
                 }
             }
             btn.dataset.state = nextState;
@@ -2138,8 +3546,13 @@
         const custom = $("#newVendorStrategyNameCustom");
         if (!select) return;
         const seen = new Set();
+        // The OTHER bucket is one row in the table (matchVendorStrategy()
+        // collapses every fallback supplier into it), but every individual
+        // supplier folded into it still needs to show up here — that's the
+        // whole point of this picker, promoting one of them out of OTHER.
         const options = vendorMatches
-            .map(m => ({ supplier: (m.SUPPLIER || "").trim(), current: (m.VENDOR || "OTHER").toUpperCase() }))
+            .flatMap(m => (m._otherSuppliers?.length ? m._otherSuppliers : [m.SUPPLIER])
+                .map(s => ({ supplier: (s || "").trim(), current: (m.VENDOR || "OTHER").toUpperCase() })))
             .filter(o => o.supplier && !seen.has(o.supplier) && seen.add(o.supplier))
             .sort((a, b) => a.supplier.localeCompare(b.supplier));
         select.innerHTML = `<option value="">Select a supplier from this upload…</option>`
@@ -2199,6 +3612,24 @@
             if (result.error) throw new Error(result.error);
 
             vendorMatches = result.matches || [];
+
+            // Every supplier that didn't match a named VENDOR_STRATEGY row
+            // falls back to the same generic OTHER default (same ASMT_ID/
+            // DC_LIST) — the backend still returns one match entry per such
+            // supplier (so each keeps its own SUPPLIER for its own SKU
+            // lookups), but they belong in ONE bucket, mapped to OTHER, full
+            // stop — not N rows, and not even a "moved under" row tying them
+            // together (that still named each supplier individually).
+            // Collapse them into a single entry up front, before anything
+            // renders, remembering the underlying supplier names only so
+            // "View SKUs" can still fetch every one of them.
+            const otherEntries = vendorMatches.filter(m => (m.VENDOR || "").toUpperCase() === "OTHER");
+            if (otherEntries.length > 1) {
+                const canonical = otherEntries[0];
+                canonical._otherSuppliers = otherEntries.map(m => m.SUPPLIER);
+                canonical.SKU_COUNT = otherEntries.reduce((sum, m) => sum + Number(m.SKU_COUNT || 0), 0);
+                vendorMatches = vendorMatches.filter(m => m === canonical || (m.VENDOR || "").toUpperCase() !== "OTHER");
+            }
 
             // The supplier/strategy counts are now covered by the YoY Vendor
             // Comparison card and the assignments table below — only surface
@@ -2421,15 +3852,25 @@
             vendorMatches.forEach((v, i) => { if (v._movedTo === matchIndex) owners.push({ index: i, match: v }); });
             owners.forEach(o => { o.match.SKU_OVERRIDES = o.match.SKU_OVERRIDES || {}; });
 
+            // The OTHER bucket collapses every fallback supplier into ONE
+            // owner (matchVendorStrategy()) but still has to fetch each
+            // one's own SKUs under its own real SUPPLIER name in
+            // EVENTS_SKU_LIST — _otherSuppliers is exactly that list.
+            // Attributed to the same owner throughout, so its overrides all
+            // land in one SKU_OVERRIDES dict and its row displays as OTHER
+            // (owner.match.VENDOR), the same as every other row it owns.
+            const supplierSources = owners.flatMap(o =>
+                (o.match._otherSuppliers?.length ? o.match._otherSuppliers : [o.match.SUPPLIER]).map(s => ({ owner: o, supplier: s })));
+
             const FETCH_PAGE_SIZE = 100;
-            const fetches = await Promise.all(owners.map(o =>
-                api(`/api/vendor_skus?supplier=${encodeURIComponent(o.match.SUPPLIER)}&page=1&page_size=${FETCH_PAGE_SIZE}`)
+            const fetches = await Promise.all(supplierSources.map(s =>
+                api(`/api/vendor_skus?supplier=${encodeURIComponent(s.supplier)}&page=1&page_size=${FETCH_PAGE_SIZE}`)
             ));
             if (vendorSkuLoadToken[matchIndex] !== myToken) return; // superseded by a newer reload
             fetches.forEach(r => { if (r.error) throw new Error(r.error); });
             const truncated = fetches.some(r => (r.pages || 1) > 1);
             const allRows = [];
-            fetches.forEach((r, oi) => (r.rows || []).forEach(row => allRows.push({ row, owner: owners[oi] })));
+            fetches.forEach((r, oi) => (r.rows || []).forEach(row => allRows.push({ row, owner: supplierSources[oi].owner })));
 
             // Whatever beyond THD_SKU_NBR actually distinguishes two rows for
             // the same THD SKU (e.g. MVNDR_NBR when it's sourced from more
@@ -2701,8 +4142,13 @@
             ? (lastPriorYearStrategy.strategy_summary || [])
             : [];
         const norm = s => (s || "").toUpperCase().trim();
-        const thisYearNames = new Set(matches.map(m => norm(m.VENDOR || m.SUPPLIER)));
-        const priorYearNames = new Set(priorRows.flatMap(r => (r.vendor || "").split(", ").map(norm)));
+        // "OTHER" is the generic no-match fallback, not a real vendor identity
+        // — comparing it year over year is meaningless (it's expected to
+        // reappear every year regardless of which actual suppliers land in
+        // it), so it's excluded here rather than flagged as a "new supplier"
+        // (light-green row highlight) any time nobody happens to match it.
+        const thisYearNames = new Set(matches.map(m => norm(m.VENDOR || m.SUPPLIER)).filter(n => n !== "OTHER"));
+        const priorYearNames = new Set(priorRows.flatMap(r => (r.vendor || "").split(", ").map(norm)).filter(n => n !== "OTHER"));
         const newSuppliers = new Set([...thisYearNames].filter(n => n && !priorYearNames.has(n)));
 
         // A prior-year row can merge several vendors under one DC list; only
@@ -2774,8 +4220,15 @@
             // "Undo" is the only way back (no DC pills to hand-edit here).
             if (m._movedTo != null) {
                 const target = vendorMatches[m._movedTo];
+                // matchedVendor is just "OTHER" for a supplier that fell
+                // back to the generic default (that's the whole reason it's
+                // being merged), which reads as a meaningless "OTHER moved
+                // under OTHER" — show its actual SUPPLIER instead. The
+                // target keeps showing "OTHER" since that IS the bucket's
+                // real name.
+                const movedLabel = isOther ? (m.SUPPLIER || matchedVendor).toUpperCase() : matchedVendor;
                 html += `<tr class="vendor-row-moved">
-                    <td colspan="4"><em>${matchedVendor}</em> moved under <strong>${(target?.VENDOR || target?.SUPPLIER || "").toUpperCase()}</strong></td>
+                    <td colspan="4"><em>${movedLabel}</em> moved under <strong>${(target?.VENDOR || target?.SUPPLIER || "").toUpperCase()}</strong></td>
                     <td class="vendor-row-actions">
                         <button type="button" class="btn btn-sm btn-secondary vendor-undo-move-btn" data-match-index="${matchIndex}">
                             <i class="fas fa-rotate-left"></i> Undo
@@ -2797,8 +4250,14 @@
             // "everything this DC group is now responsible for."
             const mergedHere = (mergedInto[matchIndex] || []).map(i => matches[i]);
             const mergedBadges = mergedHere.length
-                ? `<div class="vendor-merged-badges">${mergedHere.map(mv =>
-                    `<span class="vendor-merged-badge">+ ${(mv.VENDOR || mv.SUPPLIER || "").toUpperCase()}</span>`).join("")}</div>`
+                ? `<div class="vendor-merged-badges">${mergedHere.map(mv => {
+                    // An OTHER-bucket member's own VENDOR is just "OTHER" too
+                    // (that's the whole point — it never matched a named
+                    // strategy), so the badge would read "+ OTHER" for every
+                    // one of them; show its actual SUPPLIER there instead.
+                    const label = (mv.VENDOR || "").toUpperCase() === "OTHER" ? mv.SUPPLIER : (mv.VENDOR || mv.SUPPLIER);
+                    return `<span class="vendor-merged-badge">+ ${(label || "").toUpperCase()}</span>`;
+                }).join("")}</div>`
                 : "";
             const combinedSkuCount = Number(m.SKU_COUNT || 0) + mergedHere.reduce((sum, mv) => sum + Number(mv.SKU_COUNT || 0), 0);
 
@@ -2894,11 +4353,21 @@
 
     let availableDcOptions = [];
 
+    // Strategy-aware: VENDOR_ALIGNED reads DFC_COST_MODEL_SUBMISSION's own
+    // per-SKU dc_inclusions and has no notion of dc_counts or campus merging
+    // at all — running that check under DC_SELECTION instead was exactly
+    // what produced the wrong wholesale "109 SKUs ineligible" result (it
+    // can't see campus pairing, and it isn't scoped to the DC counts/
+    // inclusions actually chosen here). DC_SELECTION gets its own preview
+    // that reuses the same campus-merge logic the real ladder will use.
     async function loadDcEligibility() {
         const runId = $("#stratRunId")?.value?.trim() || "";
         if (!runId) {
             toast("Run ID is required", "error");
             return;
+        }
+        if (selectedStrategy === "DC_SELECTION" || selectedStrategy === "SINGLE_DC" || selectedStrategy === "MULTI_DC") {
+            return loadDcSelectionEligibility(runId);
         }
         const container = $("#dcEligibilityResults");
         container.style.display = "block";
@@ -2920,6 +4389,70 @@
                 <i class="fas fa-times-circle"></i> ${e.message}
             </div>`;
         }
+    }
+
+    async function loadDcSelectionEligibility(runId) {
+        const container = $("#dcEligibilityResults");
+        container.style.display = "block";
+        container.innerHTML = `<div style="color:var(--hd-medium-gray);font-size:0.85rem"><i class="fas fa-spinner fa-spin"></i> Checking DC selection eligibility…</div>`;
+        const dcCounts = $("#dcManual")?.style.display !== "none"
+            ? getSelectedDcCounts("#dcToggleGrid")
+            : [...$$('#dcCountChecks input:checked')].map(c => parseInt(c.dataset.dcCount));
+        if (!dcCounts.length) {
+            container.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.9rem">
+                <i class="fas fa-times-circle"></i> Select at least one DC count first
+            </div>`;
+            return;
+        }
+        try {
+            const result = await api("/api/check_dc_selection_eligibility", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    run_id: runId,
+                    event_name: eventName,
+                    sku_grp: $("#stratSkuGrp")?.value?.trim() || "",
+                    dc_counts: dcCounts,
+                    dc_inclusions: dcInclusions,
+                    dc_exclusions: dcExclusions,
+                    campus_pairs: campusPairs,
+                }),
+            });
+            if (result.error) throw new Error(result.error);
+            renderDcSelectionEligibility(result.problem_skus || [], dcCounts);
+        } catch (e) {
+            container.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.9rem">
+                <i class="fas fa-times-circle"></i> ${e.message}
+            </div>`;
+        }
+    }
+
+    function renderDcSelectionEligibility(problemSkus, dcCounts) {
+        const container = $("#dcEligibilityResults");
+        if (!problemSkus.length) {
+            container.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.9rem">
+                <i class="fas fa-check-circle"></i> Every target SKU would price at DC count(s) ${dcCounts.join(", ")} with this selection.
+            </div>`;
+            return;
+        }
+        const totalRecords = problemSkus.reduce((sum, p) => sum + (p.RECORD_COUNT || 0), 0);
+        container.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.9rem;margin-bottom:8px">
+                <i class="fas fa-triangle-exclamation"></i> ${problemSkus.length} SKU(s), ${totalRecords} record(s) would NOT price at any of DC count(s) ${dcCounts.join(", ")}
+            </div>` + problemSkus.map(p => {
+            const ineligible = p.ineligible || [];
+            const ineligibleText = ineligible.length
+                ? ineligible.map(x => `${x.dc_nbr} (${x.reason})`).join("; ")
+                : "no specific reason found in OBC_CTLG_SKU_DC for this run";
+            const altText = (p.eligible_alternatives || []).slice(0, 8).join(", ");
+            return `<div style="border:1px solid var(--hd-light-gray);border-radius:6px;padding:10px 12px;margin-bottom:8px">
+                <strong>SKU ${p.SKU_NBR}</strong> — ${p.SUPPLIER || "—"} — ${p.SKU_DESC || "—"}
+                <div style="font-size:0.82rem;color:var(--hd-medium-gray);margin:4px 0">
+                    Affects ${p.RECORD_COUNT} record(s) across ${(p.FACTORY_IDS || []).length} factory(ies)
+                </div>
+                <div style="font-size:0.82rem;color:#a94442;margin:4px 0"><strong>Ineligible DC(s):</strong> ${ineligibleText}</div>
+                ${altText ? `<div style="font-size:0.8rem;color:var(--hd-medium-gray)">Known-eligible alternative(s): ${altText}</div>` : ""}
+            </div>`;
+        }).join("");
     }
 
     function renderDcEligibility(conflicts) {
@@ -2971,7 +4504,9 @@
     // SKU_OVERRIDES mechanism Step 2's drill-down uses — the fix must be resubmitted
     // via "Submit to Cost Model" (Step 2) to actually take effect on the next
     // allocation run, since that's what writes DFC_COST_MODEL_SUBMISSION.dc_inclusions.
-    function applyEligibilityFix(conflict, newDcs) {
+    // Then sends the user back to Step 2 so they actually see the corrected
+    // selection land on the SKU, rather than a toast telling them to go check.
+    async function applyEligibilityFix(conflict, newDcs) {
         if (!conflict.thd_sku_nbrs || !conflict.thd_sku_nbrs.length) {
             toast("Could not determine which uploaded record(s) to update", "error");
             return;
@@ -2983,11 +4518,235 @@
             return;
         }
         owner.SKU_OVERRIDES = owner.SKU_OVERRIDES || {};
-        for (const thdSku of conflict.thd_sku_nbrs) {
-            owner.SKU_OVERRIDES[thdSku] = newDcs;
+
+        // conflict.thd_sku_nbrs are bare THD_SKU_NBR values, but Step 2 keys
+        // SKU_OVERRIDES by the composite THD_KEY it builds per row (THD_SKU_NBR
+        // plus whatever else disambiguates rows, e.g. MVNDR_NBR — see
+        // vendorSkuDcs()). Writing the override under the bare number would
+        // silently never match a Step 2 row whenever that owner needed the
+        // extra key columns, so look up each row's real THD_KEY first.
+        const wantedSkus = new Set(conflict.thd_sku_nbrs.map(String));
+        let targetKeys = conflict.thd_sku_nbrs.map(String);
+        try {
+            // owner.SUPPLIER is just whichever supplier this owner's row
+            // happens to carry — for the collapsed OTHER bucket that's only
+            // ONE of potentially many underlying suppliers, not necessarily
+            // this conflict's own. conflict.supplier (the SKU's real,
+            // uploaded supplier) is always the right one to fetch here.
+            const result = await api(`/api/vendor_skus?supplier=${encodeURIComponent(conflict.supplier || owner.SUPPLIER)}&page=1&page_size=100`);
+            if (!result.error && result.rows?.length) {
+                const resolved = result.rows
+                    .filter(r => wantedSkus.has(String(r.THD_SKU_NBR)))
+                    .map(r => r.THD_KEY);
+                if (resolved.length) targetKeys = resolved;
+            }
+        } catch (e) {
+            // Fall back to the bare THD_SKU_NBR keys above — still correct
+            // whenever this owner has no extra key columns.
         }
-        toast(`Updated SKU ${conflict.sku_nbr} to ${newDcs.length} DC(s) — resubmit Cost Model on Step 2 for this to take effect`, "success");
+
+        for (const key of targetKeys) {
+            owner.SKU_OVERRIDES[key] = newDcs;
+        }
+        toast(`Updated SKU ${conflict.sku_nbr} to ${newDcs.length} DC(s) — review it on Step 2`, "success");
         loadDcEligibility();
+
+        // Jump back to Step 2 and open (or refresh, if already open) this
+        // owner's SKU panel so the corrected pills are immediately visible,
+        // instead of leaving the user on Step 3 to discover it on their own.
+        const ownerIndex = vendorMatches.indexOf(owner);
+        const groupIndex = owner._movedTo != null ? owner._movedTo : ownerIndex;
+        goStep(2);
+        vendorSkuExpanded.add(groupIndex);
+        renderVendorSupplierSummary(vendorMatches);
+
+        // The panel's rows load via an async fetch (loadVendorSkuRows,
+        // triggered from inside renderVendorSupplierSummary above) — poll
+        // briefly for them to land rather than guessing a fixed delay that
+        // might be too short on a slow connection.
+        let attempts = 0;
+        const tryHighlight = () => {
+            attempts++;
+            let found = false;
+            for (const key of targetKeys) {
+                const row = document.querySelector(`tr[data-sku-key="${CSS.escape(key)}"]`);
+                if (row) {
+                    found = true;
+                    row.scrollIntoView({ behavior: "smooth", block: "center" });
+                    row.classList.add("vendor-sku-row-flash");
+                    setTimeout(() => row.classList.remove("vendor-sku-row-flash"), 2000);
+                }
+            }
+            if (!found && attempts < 15) setTimeout(tryHighlight, 300);
+        };
+        setTimeout(tryHighlight, 300);
+    }
+
+    // ── Problem SKUs (MULTI_DC, Step 7) ────────────────────────────
+    // Same flag-then-fix shape as the VENDOR_ALIGNED DC Eligibility card
+    // above, but the fix here reroutes the SKU to its own independent
+    // assortment immediately (resolve_problem_sku_override) rather than
+    // requiring a trip back to Step 2 and a cost-model resubmission — the
+    // ladder never reads a per-SKU DC selection, so there's nothing to
+    // resubmit for it to pick up.
+    let problemSkus = [];
+    let problemSkuDcState = {}; // sku_nbr -> Map(dc_nbr -> "include"|"exclude")
+
+    async function loadProblemSkus() {
+        const runId = $("#stratRunId")?.value?.trim() || "";
+        if (!runId) {
+            toast("Run ID is required", "error");
+            return;
+        }
+        const container = $("#problemSkuResults");
+        container.style.display = "block";
+        container.innerHTML = `<div style="color:var(--hd-medium-gray);font-size:0.85rem"><i class="fas fa-spinner fa-spin"></i> Checking problem SKUs…</div>`;
+        try {
+            const result = await api("/api/check_problem_skus", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ event_name: eventName, run_id: runId }),
+            });
+            if (result.error) throw new Error(result.error);
+            problemSkus = result.problem_skus || [];
+            renderProblemSkus();
+        } catch (e) {
+            container.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.9rem">
+                <i class="fas fa-times-circle"></i> ${e.message}
+            </div>`;
+        }
+    }
+
+    function renderProblemSkus() {
+        const container = $("#problemSkuResults");
+        if (!problemSkus.length) {
+            container.innerHTML = `<div class="validation-badge badge-pass" style="font-size:0.9rem">
+                <i class="fas fa-check-circle"></i> No problem SKUs — every record priced under its factory's chosen assortment.
+            </div>`;
+            return;
+        }
+        container.innerHTML = `<div class="validation-badge badge-fail" style="font-size:0.9rem;margin-bottom:8px">
+                <i class="fas fa-triangle-exclamation"></i> ${problemSkus.length} SKU(s) didn't price under their factory's chosen assortment
+            </div>` + problemSkus.map(p => {
+            if (!problemSkuDcState[p.SKU_NBR]) problemSkuDcState[p.SKU_NBR] = new Map();
+            const failedLists = (p.FAILED_DC_LISTS || []).join(" | ") || "—";
+            const ineligible = p.ineligible || [];
+            const ineligibleText = ineligible.length
+                ? ineligible.map(x => `${x.dc_nbr} (${x.reason})`).join("; ")
+                : "no specific reason found in OBC_CTLG_SKU_DC for this run";
+            const altButtons = (p.eligible_alternatives || []).slice(0, 8).map(dc =>
+                `<button type="button" class="btn btn-sm btn-secondary problem-sku-add-alt" data-sku="${p.SKU_NBR}" data-dc="${dc}" style="margin:2px">+ ${dc}</button>`
+            ).join("");
+            const dcGridId = `problemSkuDcGrid-${p.SKU_NBR}`;
+            return `<div style="border:1px solid var(--hd-light-gray);border-radius:6px;padding:10px 12px;margin-bottom:8px">
+                <strong>SKU ${p.SKU_NBR}</strong> — ${p.SUPPLIER || "—"} — ${p.SKU_DESC || "—"}
+                <div style="font-size:0.82rem;color:var(--hd-medium-gray);margin:4px 0">
+                    Affects ${p.RECORD_COUNT} record(s) across ${(p.FACTORY_IDS || []).length} factory(ies), tier(s) ${(p.TIERS || []).join(", ")}
+                </div>
+                <div style="font-size:0.8rem;color:var(--hd-medium-gray)">Didn't price at: ${failedLists}</div>
+                <div style="font-size:0.82rem;color:#a94442;margin:4px 0"><strong>Ineligible DC(s):</strong> ${ineligibleText}</div>
+                ${altButtons ? `<div style="font-size:0.8rem;color:var(--hd-medium-gray);margin-bottom:4px">Known-eligible alternative(s) — click to include: ${altButtons}</div>` : ""}
+                <div style="font-size:0.8rem;color:var(--hd-medium-gray);margin-top:6px">Pick a new DC selection for this SKU (click to include → exclude → clear):</div>
+                <div id="${dcGridId}" style="margin:6px 0"></div>
+                <button type="button" class="btn btn-sm btn-primary problem-sku-apply" data-sku="${p.SKU_NBR}">Apply</button>
+            </div>`;
+        }).join("");
+
+        problemSkus.forEach(p => {
+            const grid = $(`#problemSkuDcGrid-${p.SKU_NBR}`);
+            if (!grid) return;
+            const state = problemSkuDcState[p.SKU_NBR];
+            grid.innerHTML = ALL_DCS.map(dc =>
+                `<button type="button" class="dc-toggle-btn problem-sku-dc-btn" data-sku="${p.SKU_NBR}" data-dc="${dc.nbr}" data-state="${state.get(dc.nbr) || "none"}" title="${dc.name.toUpperCase()}">${dc.nbr}</button>`
+            ).join("");
+        });
+
+        container.querySelectorAll(".problem-sku-dc-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const sku = btn.dataset.sku;
+                const dc = Number(btn.dataset.dc);
+                const nextState = DC_FILTER_NEXT_STATE[btn.dataset.state];
+                btn.dataset.state = nextState;
+                const state = problemSkuDcState[sku];
+                if (nextState === "none") state.delete(dc);
+                else state.set(dc, nextState);
+            });
+        });
+
+        // Quick-add a known-eligible alternative straight into that SKU's
+        // include state, keeping the toggle grid's own button in sync so the
+        // two controls never disagree about what's selected.
+        container.querySelectorAll(".problem-sku-add-alt").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const sku = btn.dataset.sku;
+                const dc = Number(btn.dataset.dc);
+                problemSkuDcState[sku].set(dc, "include");
+                const gridBtn = container.querySelector(`.problem-sku-dc-btn[data-sku="${sku}"][data-dc="${dc}"]`);
+                if (gridBtn) gridBtn.dataset.state = "include";
+            });
+        });
+
+        container.querySelectorAll(".problem-sku-apply").forEach(btn => {
+            btn.addEventListener("click", () => applyProblemSkuFix(btn.dataset.sku));
+        });
+    }
+
+    async function applyProblemSkuFix(skuNbr) {
+        const state = problemSkuDcState[skuNbr];
+        const dcInclusions = [...state.entries()].filter(([, s]) => s === "include").map(([dc]) => dc);
+        const dcExclusions = [...state.entries()].filter(([, s]) => s === "exclude").map(([dc]) => dc);
+        if (!dcInclusions.length && !dcExclusions.length) {
+            toast("Pick at least one DC to include or exclude first", "error");
+            return;
+        }
+        try {
+            const result = await api("/api/resolve_problem_sku", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    run_id: $("#stratRunId")?.value?.trim() || "",
+                    event_name: eventName,
+                    sku_nbr: Number(skuNbr),
+                    dc_inclusions: dcInclusions,
+                    dc_exclusions: dcExclusions,
+                }),
+            });
+            if (result.error) throw new Error(result.error);
+            toast(`SKU ${skuNbr} rerouted to its own assortment`, "success");
+            delete problemSkuDcState[skuNbr];
+            await loadProblemSkus();
+            await refreshAssortmentResultsOnly();
+        } catch (e) {
+            toast(e.message || "Failed to apply fix", "error");
+        }
+    }
+
+    // Re-fetches Step 7's own table + confirm-gate from the output tables the
+    // fix above just corrected, WITHOUT resubmitting the ladder procedure —
+    // deliberately calls with run_id blank (the "no run_id, just re-fetch"
+    // path in /api/determine_assortment_start) rather than reusing
+    // determineAssortment()/forceRedetermine, which would submit a fresh
+    // ladder run and silently undo this SKU's independent reroute.
+    async function refreshAssortmentResultsOnly() {
+        try {
+            const started = await api("/api/determine_assortment_start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ strategy: selectedStrategy, event_name: eventName, run_id: "" }),
+            });
+            if (started.error) throw new Error(started.error);
+            const result = started.sync_result;
+            if (!result) return;
+            assortmentResults = result.results || [];
+            renderAssortmentTable(assortmentResults, result.strategy_type || selectedStrategy, result);
+            lastAssortmentResults = result;
+            applyConfirmGate(result);
+        } catch (e) {
+            // Non-fatal — the fix itself already succeeded; the user can
+            // still see it by clicking "Check Problem SKUs" again or
+            // navigating away and back.
+            console.warn("refreshAssortmentResultsOnly failed", e);
+        }
     }
 
     async function loadAvailableDcCounts(mode = "multi") {
@@ -3062,14 +4821,14 @@
             body.vendor_matches = vendorMatches;
         } else if (selectedStrategy === "DC_SELECTION" || selectedStrategy === "SINGLE_DC" || selectedStrategy === "MULTI_DC") {
             const dynamicMode = multiDcDynamicSelected && includesImports;
-            const singleDcGroupWanted = dynamicMode && !!$("#singleDcGroupToggle")?.checked;
 
-            // Manual/lookup DC counts, computed up front (dynamic mode has none
-            // yet — that's the whole point of "determine the optimal DC count(s)
-            // for me"). Whether this ends up length 1 decides, below, whether the
-            // group-run query runs for THIS path too, same as the dynamic toggle.
+            // Manual/lookup DC counts, computed up front (neither "determine
+            // for me" path has any yet — that's the whole point). Whether this
+            // ends up length 1 decides, below, whether the group-run query
+            // runs for THIS path too, same as "Single DC Count — determine for
+            // me" and (for imports) the cascading toggle.
             let dcCounts = null;
-            if (!dynamicMode) {
+            if (!dynamicMode && !singleDcCountAutoSelected) {
                 dcCounts = $("#dcManual")?.style.display !== "none"
                     ? getSelectedDcCounts("#dcToggleGrid")
                     : [...$$('#dcCountChecks input:checked')].map(c => parseInt(c.dataset.dcCount));
@@ -3080,13 +4839,13 @@
             }
 
             // A single DC count — however it was arrived at (manually checking
-            // just one box, checking just one lookup option, or the dynamic
-            // "use one DC count for the entire group" toggle) — always resolves
-            // through the same group-run query (fetch_lowest_expense_dc_count /
+            // just one box, checking just one lookup option, or "Single DC
+            // Count — determine for me") — always resolves through the same
+            // group-run query (fetch_lowest_expense_dc_count /
             // OBC_V_CTLG_RUN_BY_GROUP): the Best-Expense, lowest-TOTAL_EXP
             // assortment for the whole group, optionally constrained to specific
             // DC numbers the user has marked "include" in the DC Filter below.
-            const singleCountWanted = singleDcGroupWanted || (dcCounts && dcCounts.length === 1);
+            const singleCountWanted = singleDcCountAutoSelected || (dcCounts && dcCounts.length === 1);
 
             if (singleCountWanted) {
                 const runId = $("#stratRunId")?.value?.trim() || "";
@@ -3141,7 +4900,14 @@
                 body.strategy = "MULTI_DC";
                 body.dc_counts = dcCounts;
             }
-            body.min_containers = 5;
+            // Low-volume factory settings: read straight off Step 2's own
+            // panel (kept live by renderLowVolumeAlert(), triggered on every
+            // DC-count toggle there) rather than re-deriving anything here —
+            // defaults to the same 5/2 this used to hardcode when that panel
+            // was never shown (a domestic event, or no factory below the
+            // threshold at any point).
+            body.min_containers = parseFloat($("#minContainersInput")?.value) || 5;
+            body.low_vol_fallback_dc = parseInt($("#lowVolFallbackDc")?.value) || 2;
             body.is_import = includesImports;
             body.cascading = !!$("#cascadingToggle")?.checked;
             body.campus_pairs = campusPairs;
@@ -3149,90 +4915,6 @@
             body.dc_exclusions = dcExclusions;
             body.run_id = $("#stratRunId")?.value?.trim() || "";
             body.sku_grp = $("#stratSkuGrp")?.value?.trim() || "";
-
-            // Low-volume factory check
-            const dist = dynamicMode ? null : window._factoryDist;
-            if (dist && dist.length && body.dc_counts.length > 0) {
-                const divisor = getContainerDivisor();
-                const minDc = Math.min(...body.dc_counts);
-                const threshold = minDc;
-                const lowVol = dist.filter(f => (f.factory_cube || 0) / divisor < threshold);
-                if (lowVol.length) {
-                    const fallbackDefault = 2;
-                    const alertEl = $("#lowVolumeAlert");
-                    const renderAlert = (t, lv) => `
-                        <div class="validation-badge" style="display:block;background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:8px;padding:14px 18px;font-size:0.92rem">
-                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-                                <i class="fas fa-exclamation-triangle"></i>
-                                <strong>${lv.length} of ${dist.length} factories produce fewer than ${t} containers (min DC count).</strong>
-                            </div>
-                            <div style="margin-bottom:10px">
-                                Factories with fewer containers than the threshold will default to a
-                                <input type="number" id="lowVolFallbackDc" value="${fallbackDefault}" min="1" max="13" step="1" style="width:55px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-weight:700;text-align:center">
-                                <strong>DC strategy</strong>.
-                            </div>
-                            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-                                <label style="font-weight:600;font-size:0.85rem">Adjust container threshold:</label>
-                                <input type="number" id="minContainersInput" value="${t}" min="0" step="0.5" style="width:70px;padding:4px 8px;border:1px solid #ccc;border-radius:4px">
-                            </div>
-                            <div id="lowVolSummary" style="margin-bottom:12px;padding:8px 12px;background:#fef9e7;border-radius:6px;font-size:0.85rem;font-style:italic">
-                                Factories that produce less than <strong>${t}</strong> containers will be assorted to a <strong>${fallbackDefault}</strong> DC count strategy.
-                            </div>
-                            <div style="display:flex;justify-content:flex-end;gap:8px">
-                                <button class="btn btn-sm btn-primary" id="btnLowVolProceed">
-                                    <i class="fas fa-check"></i> Proceed
-                                </button>
-                                <button class="btn btn-sm btn-secondary" id="btnLowVolCancel">Cancel</button>
-                            </div>
-                        </div>`;
-                    alertEl.innerHTML = renderAlert(threshold, lowVol);
-                    alertEl.style.display = "block";
-                    window._pendingAssortmentBody = body;
-                    const bindAlertEvents = (currentThreshold) => {
-                        const updateSummary = () => {
-                            const t = $("#minContainersInput")?.value || currentThreshold;
-                            const d = $("#lowVolFallbackDc")?.value || 2;
-                            $("#lowVolSummary").innerHTML = `Factories that produce less than <strong>${t}</strong> containers will be assorted to a <strong>${d}</strong> DC count strategy.`;
-                        };
-                        $("#minContainersInput").addEventListener("input", updateSummary);
-                        $("#lowVolFallbackDc").addEventListener("input", updateSummary);
-                        $("#btnLowVolCancel").onclick = () => { alertEl.style.display = "none"; };
-                        $("#btnLowVolProceed").onclick = () => {
-                            body.min_containers = parseFloat($("#minContainersInput")?.value) || currentThreshold;
-                            body.low_vol_fallback_dc = parseInt($("#lowVolFallbackDc")?.value) || 2;
-                            const freshDc = getSelectedDcCounts("#dcToggleGrid");
-                            if (freshDc.length) {
-                                body.dc_counts = freshDc;
-                                body.strategy = freshDc.length === 1 ? "SINGLE_DC" : "MULTI_DC";
-                            }
-                            alertEl.style.display = "none";
-                            _executeAssortment(body);
-                        };
-                    };
-                    bindAlertEvents(threshold);
-                    const dcGrids = document.querySelectorAll("#dcToggleGrid .dc-toggle-btn");
-                    const onDcChange = () => {
-                        const freshDc = getSelectedDcCounts("#dcToggleGrid");
-                        if (!freshDc.length) return;
-                        const newThreshold = Math.min(...freshDc);
-                        const newLowVol = dist.filter(f => (f.factory_cube || 0) / divisor < newThreshold);
-                        if (!newLowVol.length) {
-                            alertEl.style.display = "none";
-                            body.dc_counts = freshDc;
-                            body.strategy = freshDc.length === 1 ? "SINGLE_DC" : "MULTI_DC";
-                            body.min_containers = newThreshold;
-                            _executeAssortment(body);
-                            return;
-                        }
-                        alertEl.innerHTML = renderAlert(newThreshold, newLowVol);
-                        body.dc_counts = freshDc;
-                        body.strategy = freshDc.length === 1 ? "SINGLE_DC" : "MULTI_DC";
-                        bindAlertEvents(newThreshold);
-                    };
-                    dcGrids.forEach(btn => btn.addEventListener("click", onDcChange));
-                    return;
-                }
-            }
         }
 
         _executeAssortment(body);
@@ -3410,30 +5092,83 @@
             const dcFactoryDetail = apiResult.dc_factory_detail || [];
             const C = 12; // colspan for full-width rows
 
+            // Campus DCs only means something when the user actually opted into
+            // treating a campus's bulk/main DCs as one ("Treat Bulk Counterparts
+            // The Same") AND that campus's DCs actually turn up in some tier's
+            // winning assortment. Can't tell that from CAMPUS_DC_LIST vs DC_LIST
+            // — the backend's CAMPUS_DC_LIST is a display-name string (e.g.
+            // "Columbus Bulk, Chicago"), built from a static per-DC name lookup
+            // applied to every row regardless of campus pairing, so it never
+            // equals the numeric DC_LIST even when Perris/Locust Grove never
+            // appear at all. Check DC_LIST itself (numeric, dash-joined) for the
+            // actual DC codes of whichever campus(es) were selected instead.
+            // Computed once here since both the High-Level Summary and the
+            // Factory & DC List Detail tables key their DC List column on it.
+            const activeCampusCodes = campusPairs.flatMap(cp => {
+                const info = CAMPUS_INFO[cp];
+                return info ? [info.main, info.bulk] : [];
+            });
+            const showCampusCol = activeCampusCodes.length > 0
+                && dcFactoryDetail.some(d => (d.DC_LIST || "").split("-")
+                    .some(code => activeCampusCodes.includes(parseInt(code, 10))));
+            // Per-tier DC_NM_LIST (actual DC facility names) for the High-Level
+            // Summary's DC List hover — ASSORTMENT_COST_SUMMARY only carries
+            // CAMPUS_DC_LIST (numeric) and DC_NAMES (campus names), not the raw
+            // DC_NM_LIST, so pull it from dc_factory_detail instead. Same "read
+            // off the first row" convention as CAMPUS_DC_LIST below: one winning
+            // list per tier, enforced by the coverage-gated selection.
+            const dcNmByTier = {};
+            for (const d of dcFactoryDetail) {
+                if (!(d.DC_TIER in dcNmByTier)) dcNmByTier[d.DC_TIER] = d.DC_NM_LIST || "—";
+            }
+            // Priced (matched) THD Keys per tier — dc_factory_detail is already
+            // matched-only (built from _combo_detail, same source ASSORTMENT_COST_
+            // SUMMARY's own matched-only expense/SLA figures come from), so summing
+            // its THD_KEYS per tier gives the truly-priced record count without any
+            // backend change. tier_summary's own THD_KEYS counts every SKU assigned
+            // to the tier regardless of whether it priced, so the two can now be
+            // compared directly to surface the gap this table used to hide.
+            const pricedKeysByTier = {};
+            for (const d of dcFactoryDetail) {
+                pricedKeysByTier[d.DC_TIER] = (pricedKeysByTier[d.DC_TIER] || 0) + (d.THD_KEYS || 0);
+            }
+
             let html = "";
 
             // ── Table 1: High-Level Summary ──
             html += `<tr><td colspan="${C}" style="background:var(--hd-orange);color:#fff;font-weight:700;padding:10px;font-size:1rem">High-Level Summary</td></tr>`;
             html += `<tr style="background:var(--hd-bg);font-weight:600">
-                <td>DC Tier</td><td style="text-align:right">THD Keys</td><td style="text-align:right">Buy Units</td>
+                <td>DC Tier</td><td>${showCampusCol ? "Campus DC List" : "DC List"}</td>
+                <td style="text-align:right">THD Keys</td><td style="text-align:right">Priced THD Keys</td><td style="text-align:right">Buy Units</td>
                 <td style="text-align:right">Delivery Expense</td><td style="text-align:right">Unit Del. Exp</td>
-                <td style="text-align:right">SLA</td><td style="text-align:right" colspan="4">Cube/Unit</td></tr>`;
-            let tKeys=0,tBuy=0,tExp=0,tSla=0;
+                <td style="text-align:right">SLA</td></tr>`;
+            let tKeys=0,tPriced=0,tBuy=0,tExp=0,tSla=0;
             for (const r of tierSummary) {
-                tKeys+=r.THD_KEYS||0; tBuy+=r.BUY_UNITS||0; tExp+=r.DELIVERY_EXPENSE||0; tSla+=(r.SLA||0)*(r.BUY_UNITS||0);
+                const priced = pricedKeysByTier[r.DC_TIER] || 0;
+                tKeys+=r.THD_KEYS||0; tPriced+=priced; tBuy+=r.BUY_UNITS||0; tExp+=r.DELIVERY_EXPENSE||0; tSla+=(r.SLA||0)*(r.BUY_UNITS||0);
+                const dcNmTitle = (dcNmByTier[r.DC_TIER] || "—").replace(/"/g, "&quot;");
+                const gap = (r.THD_KEYS || 0) - priced;
+                const pricedCell = gap > 0
+                    ? `<span style="color:#c00" title="${gap} of ${fmtN(r.THD_KEYS)} record(s) in this tier didn't price — see Check Problem SKUs"><i class="fas fa-triangle-exclamation"></i> ${fmtN(priced)}</span>`
+                    : fmtN(priced);
                 html += `<tr>
                     <td style="text-align:center;font-weight:600">${r.DC_TIER}</td>
+                    <td style="font-size:0.85rem" title="${dcNmTitle}">${r.CAMPUS_DC_LIST || "—"}</td>
                     <td style="text-align:right">${fmtN(r.THD_KEYS)}</td>
+                    <td style="text-align:right">${pricedCell}</td>
                     <td style="text-align:right">${fmtN(r.BUY_UNITS)}</td>
                     <td style="text-align:right">${fmt$(r.DELIVERY_EXPENSE)}</td>
                     <td style="text-align:right">${fmt$(r.UNIT_DELIVERY_EXP)}</td>
-                    <td style="text-align:right">${fmtD(r.SLA,2)}</td>
-                    <td style="text-align:right" colspan="4">${fmtD(r.CUBE_PER_UNIT,2)}</td></tr>`;
+                    <td style="text-align:right">${fmtD(r.SLA,2)}</td></tr>`;
             }
+            const tGap = tKeys - tPriced;
+            const tPricedCell = tGap > 0
+                ? `<span style="color:#c00">${fmtN(tPriced)}</span>`
+                : fmtN(tPriced);
             html += `<tr style="font-weight:700;border-top:2px solid #333">
-                <td>Total</td><td style="text-align:right">${fmtN(tKeys)}</td><td style="text-align:right">${fmtN(tBuy)}</td>
+                <td>Total</td><td></td><td style="text-align:right">${fmtN(tKeys)}</td><td style="text-align:right">${tPricedCell}</td><td style="text-align:right">${fmtN(tBuy)}</td>
                 <td style="text-align:right">${fmt$(tExp)}</td><td style="text-align:right">${fmt$(tBuy?tExp/tBuy:0)}</td>
-                <td style="text-align:right">${fmtD(tBuy?tSla/tBuy:0,2)}</td><td colspan="4"></td></tr>`;
+                <td style="text-align:right">${fmtD(tBuy?tSla/tBuy:0,2)}</td></tr>`;
 
             // ── Table 2: Factory & DC List Detail (expandable by tier) —
             // combines the former separate DC List Detail / Factory Detail
@@ -3444,7 +5179,7 @@
             html += `<tr><td colspan="${C}">&nbsp;</td></tr>`;
             html += `<tr><td colspan="${C}" style="background:var(--hd-orange);color:#fff;font-weight:700;padding:10px;font-size:1rem">Factory & DC List Detail</td></tr>`;
             html += `<tr style="background:var(--hd-bg);font-weight:600">
-                <td>DC Tier</td><td>Campus DCs</td><td>DC List</td><td>DC Names</td><td>Factory ID</td>
+                <td>DC Tier</td><td>${showCampusCol ? "Campus DC List" : "DC List"}</td><td>Factory</td>
                 <td style="text-align:right">Containers</td><td style="text-align:right">THD Keys</td>
                 <td style="text-align:right">Buy Units</td>
                 <td style="text-align:right">Del. Expense</td><td style="text-align:right">Unit Del. Exp</td>
@@ -3462,24 +5197,26 @@
                 // Every row under a tier shares the same Campus DC List (one
                 // distinct winning campus list per tier, enforced by the
                 // coverage-gated selection) — safe to read off the first row
-                // and show once at the rollup level, not left blank.
+                // and show once at the rollup level, not left blank. DC_NM_LIST
+                // (the actual DC facility names) rides along as the hover title,
+                // same convention as the High-Level Summary table above.
                 const campusList = tRows[0]?.CAMPUS_DC_LIST || "—";
-                // The expand/collapse control lives on DC List (not DC Tier) —
-                // DC Tier is a plain value, the row count is what's expanding.
+                const campusListTitle = (tRows[0]?.DC_NM_LIST || "—").replace(/"/g, "&quot;");
+                // The expand/collapse control now lives on Factory (not DC List) —
+                // clicking it reveals the per-factory rows this tier rolls up.
                 html += `<tr style="font-weight:600;background:#f9f9f9;cursor:pointer" onclick="document.querySelectorAll('.${gid}').forEach(r=>r.style.display=r.style.display==='none'?'':'none');this.querySelector('.tog').textContent=this.querySelector('.tog').textContent==='▶'?'▼':'▶'">
                     <td style="text-align:center">${tier}</td>
-                    <td style="font-size:0.85rem">${campusList}</td>
-                    <td><span class="tog">▶</span> ${tRows.length} row${tRows.length === 1 ? "" : "s"}</td><td></td><td></td>
+                    <td style="font-size:0.85rem" title="${campusListTitle}">${campusList}</td>
+                    <td><span class="tog">▶</span> ${tRows.length} row${tRows.length === 1 ? "" : "s"}</td>
                     <td style="text-align:right">${fmtD(sub.cont,2)}</td><td style="text-align:right">${fmtN(sub.keys)}</td>
                     <td style="text-align:right">${fmtN(sub.buy)}</td>
                     <td style="text-align:right">${fmt$(sub.exp)}</td><td style="text-align:right">${fmt$(sub.buy?sub.exp/sub.buy:0)}</td>
                     <td style="text-align:right">${fmtD(sub.buy?sub.sla/sub.buy:0,2)}</td><td style="text-align:right">${fmtD(cubeAvg,2)}</td></tr>`;
                 for (const r of tRows) {
+                    const rowListTitle = (r.DC_NM_LIST || "—").replace(/"/g, "&quot;");
                     html += `<tr class="${gid}" style="display:none">
                         <td></td>
-                        <td style="font-size:0.85rem">${r.CAMPUS_DC_LIST||'—'}</td>
-                        <td style="font-size:0.85rem">${r.DC_LIST||'—'}</td>
-                        <td style="font-size:0.85rem">${r.DC_NM_LIST||'—'}</td>
+                        <td style="font-size:0.85rem" title="${rowListTitle}">${r.CAMPUS_DC_LIST||'—'}</td>
                         <td>${r.FACTORY_ID||'—'}</td>
                         <td style="text-align:right">${fmtD(r.CONTAINERS,2)}</td><td style="text-align:right">${fmtN(r.THD_KEYS)}</td>
                         <td style="text-align:right">${fmtN(r.BUY_UNITS)}</td>
@@ -3488,7 +5225,7 @@
                 }
             }
             html += `<tr style="font-weight:700;border-top:2px solid #333">
-                <td>Grand Total</td><td></td><td></td><td></td><td></td>
+                <td>Grand Total</td><td></td><td></td>
                 <td style="text-align:right">${fmtD(dfCont,2)}</td><td style="text-align:right">${fmtN(dfKeys)}</td>
                 <td style="text-align:right">${fmtN(dfBuy)}</td>
                 <td style="text-align:right">${fmt$(dfExp)}</td><td style="text-align:right">${fmt$(dfBuy?dfExp/dfBuy:0)}</td>
@@ -3608,22 +5345,31 @@
                 },
             });
         } else {
+            // Backs SINGLE_DC (both the manual/lookup one-count pick and the
+            // "determine for me" group-run query) — assortment_engine.py's
+            // _dc_count_single returns SKU_NBR/SUPPLIER/FACTORY_ID/
+            // ASSIGNED_DC_COUNT/CAMP_ASMT_ID/DC_LIST/TOTAL_EXPENSE, not the
+            // CAMPUS_DC_LIST/TOTAL_EXP/TOTAL_SLA/ASMT_ID shape MULTI_DC's
+            // dynamic-sweep table uses (that one renders in the branch above).
             chartContainer.style.display = "none";
-            thead.innerHTML = "<th>SKU_NBR</th><th>DC_COUNT</th><th>DC_LIST</th><th>CAMPUS_DC_LIST</th><th>TOTAL_EXP</th><th>TOTAL_SLA</th><th>ASMT_ID</th>";
+            const factoryTh = includesImports ? "<th>FACTORY_ID</th>" : "";
+            thead.innerHTML = `<th>SKU_NBR</th><th>SUPPLIER</th>${factoryTh}<th>DC_COUNT</th><th>DC_LIST</th><th>ASMT_ID</th><th>TOTAL_EXPENSE</th>`;
+            const colCount = includesImports ? 7 : 6;
             if (!rows.length) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#666;padding:20px">No results</td></tr>';
+                tbody.innerHTML = `<tr><td colspan="${colCount}" style="text-align:center;color:#666;padding:20px">No results</td></tr>`;
                 return;
             }
             for (const r of rows) {
                 const tr = document.createElement("tr");
+                const factoryTd = includesImports ? `<td>${r.FACTORY_ID || "—"}</td>` : "";
                 tr.innerHTML = `
                     <td>${r.SKU_NBR || "—"}</td>
+                    <td>${r.SUPPLIER || "—"}</td>
+                    ${factoryTd}
                     <td>${r.ASSIGNED_DC_COUNT ?? "—"}</td>
                     <td>${r.DC_LIST || "—"}</td>
-                    <td>${r.CAMPUS_DC_LIST || "—"}</td>
-                    <td style="text-align:right">${r.TOTAL_EXP != null ? fmtNum(r.TOTAL_EXP) : "—"}</td>
-                    <td style="text-align:right">${r.TOTAL_SLA != null ? fmtNum(r.TOTAL_SLA) : "—"}</td>
-                    <td>${r.ASMT_ID || "—"}</td>
+                    <td>${r.CAMP_ASMT_ID ?? "—"}</td>
+                    <td style="text-align:right">${r.TOTAL_EXPENSE != null ? fmtNum(r.TOTAL_EXPENSE) : "—"}</td>
                 `;
                 tbody.appendChild(tr);
             }
@@ -3664,6 +5410,12 @@
             if (dynamicMode) {
                 body.strategy = "MULTI_DC";
                 body.dc_counts = [];
+            } else if (singleDcCountAutoSelected) {
+                // The actual count was already resolved back in
+                // determineAssortment() (Step 6) via the group-run query —
+                // reuse it rather than re-querying here.
+                body.strategy = "SINGLE_DC";
+                body.dc_counts = singleDcGroupChoice?.dc_count ? [singleDcGroupChoice.dc_count] : [];
             } else {
                 const dcCounts = getSelectedDcCounts("#dcToggleGrid");
                 const checkboxSelected = [...$$('#dcCountChecks input:checked')].map(c => parseInt(c.dataset.dcCount));
@@ -3954,6 +5706,7 @@
         setupFileUpload();
         setupBqValidation();
         setupInsert();
+        setupStockTypeSplit();
         setupAsmtTool();
         setupStrategy();
         setupAllocation();

@@ -48,30 +48,30 @@
                 <div>
                     <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Event Name</label>
                     <select id="step1EventNameSelect"
-                        style="display:block;width:240px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
+                        style="display:block;width:240px;height:34px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
                         <option value="">Loading…</option>
                     </select>
                     <input type="text" id="step1EventNameCustom" placeholder="Enter new event name"
-                        style="display:none;width:240px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
+                        style="display:none;width:240px;height:34px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
                 </div>
                 <div>
                     <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Event Year</label>
                     <input type="number" id="step1EventYear" placeholder="e.g. 2027"
-                        style="display:block;width:120px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
+                        style="display:block;width:120px;height:34px;padding:6px 10px;border-radius:4px;border:1px solid #ccc;font-size:.85rem;margin-top:4px">
                 </div>
                 <div style="min-width:220px">
                     <label style="font-size:.82rem;font-weight:600;color:var(--hd-dark-gray)">Event Type</label>
                     <div class="import-toggle" style="display:flex;gap:6px;margin-top:4px">
                         <label class="strategy-option" style="display:inline-block;flex:1">
                             <input type="radio" name="importToggle" value="false" checked />
-                            <div class="strategy-card" style="padding:6px 10px;text-align:center;height:100%;display:flex;align-items:center;justify-content:center">
-                                <strong><i class="fas fa-home"></i> Domestic</strong>
+                            <div class="strategy-card" style="padding:0 10px;height:34px;text-align:center;display:flex;align-items:center;justify-content:center">
+                                <strong style="font-size:.68rem;white-space:nowrap"><i class="fas fa-home"></i> Domestic</strong>
                             </div>
                         </label>
                         <label class="strategy-option" style="display:inline-block;flex:1">
                             <input type="radio" name="importToggle" value="true" />
-                            <div class="strategy-card" style="padding:6px 10px;text-align:center;height:100%;display:flex;align-items:center;justify-content:center">
-                                <strong><i class="fas fa-ship"></i> Import</strong>
+                            <div class="strategy-card" style="padding:0 10px;height:34px;text-align:center;display:flex;align-items:center;justify-content:center">
+                                <strong style="font-size:.68rem;white-space:nowrap"><i class="fas fa-ship"></i> Import</strong>
                             </div>
                         </label>
                     </div>
@@ -92,21 +92,6 @@
                 </button>
             </div>
             <div id="priorStrategySection" style="display:none;margin-bottom:20px;padding:14px 16px;background:#f5f5f5;border-radius:6px"></div>
-
-            <!-- Template Download Section -->
-            <div style="margin-top:20px;padding:16px;background:#eef6ff;border:1px solid #b6d4fe;border-radius:8px">
-                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
-                    <div>
-                        <strong id="templateTitleText" style="display:block;margin-bottom:4px;color:var(--hd-dark-gray);font-size:0.92rem">
-                            <i class="fas fa-file-excel" style="color:#107c41;margin-right:6px"></i> Domestic Template
-                        </strong>
-                        <span id="templateDescText" style="font-size:.82rem;color:var(--hd-medium-gray)"></span>
-                    </div>
-                    <button class="btn btn-primary" id="btnDownloadTemplate" style="background:#107c41;border-color:#107c41">
-                        <i class="fas fa-download"></i> Download
-                    </button>
-                </div>
-            </div>
         </div>
         <div class="wizard-nav">
             <span></span>
@@ -180,8 +165,8 @@
                 <button class="btn btn-primary" id="btnSubmitCostModel">
                     <i class="fas fa-upload"></i> Submit to Cost Model
                 </button>
-                <button class="btn btn-sm" id="btnDeleteCostModel" style="background:#dc3545;color:#fff;font-size:0.8rem;padding:6px 12px">
-                    <i class="fas fa-trash-alt"></i> Delete Previous Submission
+                <button class="btn btn-sm" id="btnDeleteCostModel" style="display:none;background:#dc3545;color:#fff;font-size:0.8rem;padding:6px 12px">
+                    <i class="fas fa-rotate"></i> Replace Previous Upload
                 </button>
                 <button class="btn btn-primary" id="btnRunAsmtTool" style="display:none;margin-left:10px" disabled>
                     <i class="fas fa-play"></i> Run Assortment Tool
@@ -218,7 +203,6 @@
             </div>
             <div id="dcEligibilityResults" style="display:none;margin-top:12px"></div>
         </div>
-        <div id="lowVolumeAlert" style="display:none;margin-bottom:16px"></div>
         <div class="wizard-nav">
             <button class="btn btn-secondary" onclick="goStep(2)"><i class="fas fa-arrow-left"></i> Back</button>
             <button class="btn btn-primary" id="btnDetermineAsmt">
@@ -232,9 +216,17 @@
     <!-- ═══════════════════════════════════════════════════════════ -->
     <section class="wizard-panel" id="panel-2">
         <!-- Card 1: Upload & Validate SKU List -->
-        <div class="card">
-            <h3><i class="fas fa-cloud-arrow-up"></i> Upload & Validate SKU List</h3>
-            <p style="margin-bottom:16px;color:var(--hd-medium-gray)">
+        <div class="card" style="margin-bottom:20px">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;border-bottom:2px solid var(--hd-orange);padding-bottom:10px;margin-bottom:16px">
+                <h3 style="margin:0;border-bottom:none;padding-bottom:0"><i class="fas fa-cloud-arrow-up"></i> Upload & Validate SKU List</h3>
+                <div style="text-align:right">
+                    <button class="btn btn-secondary" id="btnDownloadTemplate">
+                        <i class="fas fa-download"></i> Download Import Template
+                    </button>
+                    <div id="templateDescText" style="margin-top:4px;font-size:.78rem;color:var(--hd-medium-gray)"></div>
+                </div>
+            </div>
+            <p style="margin:0 0 16px;color:var(--hd-medium-gray)">
                 Upload your SKU list (.xlsx or .csv) to validate data formatting.
             </p>
 
@@ -282,56 +274,6 @@
                     </div>
                 </div>
 
-                <!-- Success Summary -->
-                <div id="successSection" style="display:none;margin-top:12px">
-                    <div id="autoInsertStatus" style="display:none;margin-bottom:12px"></div>
-                    <div id="thdKeyInfo" style="display:none;margin-bottom:10px;padding:8px 12px;background:#f5f5f5;border-radius:6px;font-size:.82rem">
-                        <strong>THD_KEY:</strong> <span id="thdKeyLabel"></span>
-                    </div>
-                    <div class="kpi-cards" style="justify-content:flex-start">
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumRows">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Rows</div>
-                        </div>
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumBuyUnits">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Total Buy Units</div>
-                        </div>
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumOptimalBuy">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Optimal Buy Units</div>
-                        </div>
-                        <div class="kpi-card">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumSuppliers">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Suppliers</div>
-                        </div>
-                        <div class="kpi-card" id="sumFactoriesCard" style="display:none">
-                            <span style="font-size:1.2rem;font-weight:700" id="sumFactories">—</span>
-                            <div style="font-size:.72rem;color:var(--hd-medium-gray)">Factories</div>
-                        </div>
-                    </div>
-                    <!-- Factory distribution table (imports only) -->
-                    <div id="factoryDistribution" style="display:none;margin-top:12px">
-                        <h5 style="margin-bottom:6px;font-size:.82rem;color:var(--hd-dark-gray)">Factory Distribution</h5>
-                        <p style="margin:0 0 6px;font-size:.7rem;color:#888">
-                            Bar height is <span id="factoryDistChartMetricLabel">Containers</span>; the number above each bar is its distinct THD Key count.
-                        </p>
-                        <div id="factoryDistChartWrap" class="chart-scroll" style="overflow-x:auto;margin-bottom:10px">
-                            <svg id="factoryDistChart" style="display:block"></svg>
-                        </div>
-                        <div id="factoryDistTooltip" class="chart-tooltip" role="status" style="display:none"></div>
-                        <div class="table-container" style="max-height:200px;overflow-y:auto">
-                            <table class="detail-table" style="font-size:.8rem">
-                                <thead><tr><th>Factory ID</th><th style="text-align:right">SKUs<br><span style="font-weight:normal;font-size:.65rem;color:#888">distinct THD Keys</span></th><th style="text-align:right">Optimal Buy Units</th><th style="text-align:right">Containers</th></tr></thead>
-                                <tbody id="factoryDistBody"></tbody>
-                            </table>
-                        </div>
-                        <button class="btn btn-secondary" id="btnDownloadFactoryDist" style="margin-top:8px;font-size:.75rem">
-                            <i class="fas fa-download"></i> Download Factory Distribution
-                        </button>
-                    </div>
-                </div>
-
                 <!-- Import mismatch alert -->
                 <div id="importMismatchAlert" style="display:none;margin-top:12px;padding:14px 16px;background:#fff3cd;border:1px solid #ffc107;border-radius:8px">
                     <i class="fas fa-exclamation-triangle" style="color:#856404;margin-right:6px"></i>
@@ -347,23 +289,93 @@
             </div>
         </div>
 
-        <!-- Card 2: Define Strategy & Eligible DC Network -->
-        <div class="card" style="margin-bottom:20px">
+        <!-- Card 2: Upload Summary — THD_KEY, high-level stats, factory
+             distribution. Its own container, separate from the upload/
+             validate card above, since it's a different kind of content
+             (results, not the upload workflow itself). Still gated behind
+             #successSection's own display:none, exactly as before this split. -->
+        <div id="successSection" class="card" style="display:none;margin-bottom:20px">
+            <div id="autoInsertStatus" style="display:none;margin-bottom:12px"></div>
+            <div id="thdKeyInfo" style="display:none;margin-bottom:10px;padding:8px 12px;background:#f5f5f5;border-radius:6px;font-size:.82rem">
+                <strong>THD_KEY:</strong> <span id="thdKeyLabel"></span>
+            </div>
+            <div class="kpi-cards" style="justify-content:flex-start">
+                <div class="kpi-card">
+                    <span style="font-size:1.2rem;font-weight:700" id="sumRows">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">Records</div>
+                </div>
+                <div class="kpi-card">
+                    <span style="font-size:1.2rem;font-weight:700" id="sumBuyUnits">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">Total Buy Units</div>
+                </div>
+                <div class="kpi-card">
+                    <span style="font-size:1.2rem;font-weight:700" id="sumOptimalBuy">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">Optimal Buy Units</div>
+                </div>
+                <div class="kpi-card">
+                    <span style="font-size:1.2rem;font-weight:700" id="sumSuppliers">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">Suppliers</div>
+                </div>
+                <div class="kpi-card" id="sumFactoriesCard" style="display:none">
+                    <span style="font-size:1.2rem;font-weight:700" id="sumFactories">—</span>
+                    <div style="font-size:.72rem;color:var(--hd-medium-gray)">Factories</div>
+                </div>
+            </div>
+            <!-- Factory distribution table (imports only) -->
+            <div id="factoryDistribution" style="display:none;margin-top:20px;padding:16px;background:var(--hd-bg);border:1px solid var(--hd-light-gray);border-radius:var(--radius);box-shadow:var(--shadow-sm)">
+                <h5 style="margin-bottom:6px;font-size:.98rem;color:var(--hd-dark-gray)">Factory Distribution</h5>
+                <p style="margin:0 0 6px;font-size:.85rem;color:#888">
+                    Bar height is <span id="factoryDistChartMetricLabel">Containers</span>; the number above each bar is its distinct record count.
+                </p>
+                <div id="factoryDistChartWrap" class="chart-scroll" style="overflow-x:auto;margin-bottom:10px">
+                    <svg id="factoryDistChart" style="display:block"></svg>
+                </div>
+                <div id="factoryDistTooltip" class="chart-tooltip" role="status" style="display:none"></div>
+                <div class="table-container" style="max-height:200px;overflow-y:auto;display:none">
+                    <table class="detail-table" style="font-size:.9rem">
+                        <thead><tr><th>Factory</th><th style="text-align:right">Containers</th><th style="text-align:right">Distinct Records</th></tr></thead>
+                        <tbody id="factoryDistBody"></tbody>
+                    </table>
+                </div>
+                <button class="btn btn-secondary" id="btnDownloadFactoryDist" style="margin-top:8px;font-size:.88rem">
+                    <i class="fas fa-download"></i> Download
+                </button>
+            </div>
+        </div>
+
+        <!-- Card 3: Define Strategy & Eligible DC Network -->
+        <div class="card" id="defineStrategyCard">
             <h3><i class="fas fa-sliders"></i> Step 2: Define Strategy & Eligible DC Network</h3>
 
             <!-- Follow last year's strategy? Populated from Step 1's prior-year
                  lookup — pre-fills strategy type, DC counts, buildings, and
                  campus pairing, but leaves every control editable below. -->
             <div id="followLastYearBox" style="display:none;margin-bottom:16px">
-                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:#000;font-size:.85rem;margin:0">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-size:.76rem;font-weight:600;color:var(--hd-medium-gray);text-transform:uppercase;letter-spacing:.4px">
                     <input type="checkbox" id="followLastYearToggle" />
-                    Use last year's vendor-aligned strategy
+                    Use last year's strategy
                 </label>
-                <div id="followLastYearNote" style="display:none;margin-top:8px;font-size:0.85rem;color:#333"></div>
+                <div id="followLastYearNote" style="display:none;margin-top:8px;font-size:.76rem;font-weight:600;color:var(--hd-medium-gray);text-transform:uppercase;letter-spacing:.4px"></div>
             </div>
 
-            <!-- Strategy Selection: Condensed into Vendor-Aligned and DC Selection -->
-            <div class="strategy-grid">
+            <!-- Cascading Assortments -->
+            <div class="param-group" id="paramsCascading" style="display:none;margin-bottom:16px">
+                <div class="form-row">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.76rem;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--hd-medium-gray)">
+                        <input type="checkbox" id="cascadingToggle" checked />
+                        Cascading Assortments
+                    </label>
+                    <span style="font-size:0.8rem;color:var(--hd-medium-gray);margin-top:2px;display:block">
+                        Each tier's DCs are a subset of the next larger tier
+                    </span>
+                </div>
+            </div>
+
+            <!-- Strategy Selection: Condensed into Vendor-Aligned and DC Selection.
+                 Hidden while segment tabs are active (see showSegmentTabs in
+                 app.js) — the Bulk/Parcel split only ever applies to DC
+                 Selection, so there's no choice to make per segment. -->
+            <div class="strategy-grid" id="strategyGrid">
                 <label class="strategy-option">
                     <input type="radio" name="strategy" value="VENDOR_ALIGNED" />
                     <div class="strategy-card">
@@ -426,7 +438,7 @@
                                 <button class="btn btn-primary" id="btnConfirmVendorStrategy">
                                     <i class="fas fa-check"></i> Confirm Vendor Strategies
                                 </button>
-                                <button class="btn btn-sm" id="btnDeleteVendorCostModel" style="display:none;background:#dc3545;color:#fff;font-size:0.8rem;padding:6px 12px">
+                                <button class="btn btn-sm" id="btnDeleteVendorCostModel" style="display:none;background:#dc3545;color:#fff;font-size:.68rem;padding:6px 12px">
                                     <i class="fas fa-rotate"></i> Replace Previous Upload
                                 </button>
                             </div>
@@ -440,48 +452,154 @@
 
                 <!-- DC Selection -->
                 <div class="param-group" id="paramsDcSelection" style="display:none">
+                    <!-- Bulk vs. Parcel strategy split (opt-in). Classifies each uploaded
+                         row via /api/classify_stock_type (SCHN_SKU_ATTR dimensions/weight
+                         + combo type, keyed off THD_SKU_NBR) -- never run automatically,
+                         since it's an extra BigQuery round trip most events don't need.
+                         Only applies to DC Selection (a vendor's DC assignment is driven
+                         by who the supplier is, not by shipping category), so this lives
+                         inside paramsDcSelection rather than above the strategy grid. -->
+                    <div id="stockTypeSplitBox" style="display:none;margin-bottom:16px">
+                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0;font-size:.76rem;font-weight:600;color:var(--hd-medium-gray);text-transform:uppercase;letter-spacing:.4px">
+                            <input type="checkbox" id="stockTypeSplitToggle" />
+                            Split strategy by Bulk vs. Parcel SKUs
+                        </label>
+                        <div id="stockTypeConfirmBox" style="display:none;margin-top:12px;padding:14px 16px;border:1.5px dashed var(--hd-light-gray);border-radius:8px">
+                            <div id="stockTypeSummary" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+                            <div id="stockTypeMissingSection" style="display:none;margin-top:14px">
+                                <strong style="font-size:.78rem;color:#856404;text-transform:uppercase">
+                                    <i class="fas fa-exclamation-triangle"></i> Needs your input — couldn't confidently classify
+                                </strong>
+                                <div id="stockTypeMissingTable" style="margin-top:8px;max-height:260px;overflow-y:auto"></div>
+                            </div>
+                            <!-- Appears automatically once every row has a Bulk/Parcel answer
+                                 (no manual "Confirm" click needed) — see
+                                 updateStockTypeSegmentVisibility in app.js. Disappears again
+                                 if an Undo puts any row back to Needs Input. -->
+                            <div id="stockTypeConfirmedBadge" style="display:none;margin-top:14px;padding:8px 12px;background:#d4edda;color:#155724;border-radius:6px;font-size:.85rem">
+                                <i class="fas fa-check-circle"></i> All SKUs categorized — configure a strategy for each segment below.
+                            </div>
+                            <div id="stockTypeConfirmActions" style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+                                <button type="button" class="btn btn-sm btn-secondary" id="btnDownloadStockTypeSplit">
+                                    <i class="fas fa-download"></i> Download
+                                </button>
+                                <button type="button" class="btn btn-sm btn-secondary" id="btnCancelStockTypeSplit">Cancel</button>
+                            </div>
+                            <div id="stockTypeSplitStatus" style="margin-top:8px;font-size:.8rem"></div>
+                        </div>
+                    </div>
+
+                    <!-- Segment tabs: only shown once the Bulk/Parcel split above is
+                         confirmed. The DC Selection controls below are shared DOM —
+                         switching tabs saves the outgoing segment's config and loads
+                         the incoming one onto the same controls (see setupSegmentTabs
+                         in app.js), rather than duplicating this whole param group twice. -->
+                    <div id="stockTypeSegmentTabs" style="display:none;margin-bottom:8px">
+                        <strong style="font-size:.78rem;color:var(--hd-medium-gray);text-transform:uppercase;letter-spacing:.02em">
+                            <i class="fas fa-code-branch"></i> Step 2a — pick a strategy for each segment
+                        </strong>
+                        <div class="segment-tabs">
+                            <button type="button" class="segment-tab" data-segment="BULK">
+                                <div class="segment-tab-label">
+                                    <span class="segment-tab-name">📦 Bulk SKUs</span>
+                                    <span class="segment-tab-count" id="segmentTabCountBulk"></span>
+                                </div>
+                                <span class="segment-tab-status" id="segmentTabStatusBulk">Not configured</span>
+                            </button>
+                            <button type="button" class="segment-tab" data-segment="PARCEL">
+                                <div class="segment-tab-label">
+                                    <span class="segment-tab-name">📮 Parcel SKUs</span>
+                                    <span class="segment-tab-count" id="segmentTabCountParcel"></span>
+                                </div>
+                                <span class="segment-tab-status" id="segmentTabStatusParcel">Not configured</span>
+                            </button>
+                        </div>
+                        <div id="segmentActiveBanner" class="segment-active-banner"></div>
+                    </div>
+
+                    <!-- Cross-segment SKU_NBR conflict reconciliation (rare — see
+                         _find_cross_segment_sku_conflicts in app.py). Populated by
+                         renderSubmissionConflicts() only when /api/submit_cost_model
+                         actually hits one at submit time. -->
+                    <div id="submissionConflictBox" style="display:none;margin-bottom:16px"></div>
+
                     <div class="form-row">
                         <label>Do you know which DC count(s) you want?</label>
                         <div style="display:flex;gap:10px;margin-top:6px">
-                            <button class="btn btn-sm btn-primary" id="btnDcKnow">Yes</button>
-                            <button class="btn btn-sm btn-secondary" id="btnDcLookup">No, determine the optimal DC count(s) for me</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnDcKnow" style="width:auto;padding:6px 16px;font-size:.88rem">Yes</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnDcNo" style="width:auto;padding:6px 16px;font-size:.88rem">No</button>
+                        </div>
+                    </div>
+
+                    <!-- Shown only after "No" — a real fork, not just a label:
+                         Single DC Count always runs the group-run query with no
+                         DC-count constraint (the whole group shares one
+                         Best-Expense assortment); Multi-DC Count keeps each
+                         strategy's own "determine for me" behavior (import:
+                         per-factory cascading tiers; domestic: pick from the
+                         available-counts list below). -->
+                    <div id="dcNoKnowChoice" style="display:none;margin-top:12px">
+                        <label style="margin-bottom:8px;display:block;font-size:.76rem;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--hd-medium-gray)">Single DC count or multi-DC count?</label>
+                        <div style="display:flex;gap:10px;flex-wrap:wrap">
+                            <button class="btn btn-sm dc-toggle-btn" id="btnDcSingleAuto" style="width:auto;padding:6px 16px">Single DC Count — determine for me</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnDcMultiAuto" style="width:auto;padding:6px 16px">Multi-DC Count — determine for me</button>
                         </div>
                     </div>
 
                     <!-- Manual Selection (1 to 13) -->
                     <div id="dcManual" style="display:none;margin-top:12px">
-                        <label style="margin-bottom:8px;display:block;font-size:.72rem;font-weight:400;text-transform:none;letter-spacing:normal;color:var(--hd-medium-gray)">Select DC Count(s) <span style="color:#888">(1 to 13)</span></label>
+                        <label style="margin-bottom:8px;display:block;font-size:.76rem;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--hd-medium-gray)">Select DC Count(s)</label>
                         <div class="dc-toggle-grid" id="dcToggleGrid"></div>
                         <div id="dcSelectionCountBadge" style="margin-top:10px"></div>
                     </div>
 
-                    <!-- Lookup / Dynamic Selection -->
-                    <div id="dcLookup" style="display:none;margin-top:12px">
-                        <div class="form-row">
-                            <button class="btn btn-primary btn-sm" id="btnLoadDcCounts">
-                                <i class="fas fa-search"></i> Load Available DC Counts
-                            </button>
-                        </div>
-                        <div id="dcCountResult" style="display:none;margin-top:12px">
-                            <div id="dcCountSummary" style="margin-bottom:10px"></div>
-                            <div class="dc-count-checks" id="dcCountChecks"></div>
-                        </div>
-                    </div>
-                    <div id="dcDynamic" style="display:none;margin-top:12px">
+                    <!-- Surfaced here (not on the Asmt Tool step) because the
+                         DC count toggles it reacts to live via onDcChange —
+                         in dcToggleGrid above — only exist on this panel. -->
+                    <div id="lowVolumeAlert" style="display:none;margin-top:12px"></div>
+
+                    <!-- No -> Single DC Count, determine for me -->
+                    <div id="dcSingleAuto" style="display:none;margin-top:12px">
                         <div class="validation-badge badge-pass" style="font-size:0.9rem;display:block">
-                            <i class="fas fa-magic"></i> Per factory, the tool prices every DC count (2-13), then assigns the
-                            widest count that keeps containers at least 80% full while staying within 2% of that factory's
-                            cheapest option. Each factory may land on a different DC count and assortment ID.
-                        </div>
-                        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;font-size:.85rem;font-weight:600;text-transform:none;letter-spacing:normal;color:var(--hd-dark-gray)">
-                            <input type="checkbox" id="singleDcGroupToggle">
-                            Use one DC count for the entire group instead
-                        </label>
-                        <div id="singleDcGroupHint" style="margin-top:6px;font-size:.8rem;color:var(--hd-medium-gray)">
-                            Every factory shares the same DC count and assortment ID — picked automatically as the
-                            Best-Expense option with the lowest total expense across the whole group.
+                            <i class="fas fa-magic"></i> Every factory/SKU shares one DC count and assortment ID —
+                            picked automatically as the Best-Expense option with the lowest total expense across the
+                            whole group, when you click "Determine Assortment IDs."
                         </div>
                         <div id="singleDcGroupResult" style="display:none;margin-top:10px"></div>
+                    </div>
+
+                    <!-- No -> Multi-DC Count, determine for me -->
+                    <div id="dcMultiAuto" style="display:none;margin-top:12px">
+                        <!-- Import: per-factory dynamic cascading tiers -->
+                        <div id="dcMultiAutoImport" style="display:none">
+                            <div class="validation-badge badge-pass" style="font-size:0.9rem;display:block">
+                                <i class="fas fa-magic"></i> Per factory, the tool prices every DC count (2-13), then assigns the
+                                widest count that keeps containers at least 80% full while staying within 2% of that factory's
+                                cheapest option. Each factory may land on a different DC count and assortment ID.
+                            </div>
+                        </div>
+                        <!-- Domestic: pick from the available-counts list (the
+                             automatic domestic multi-DC "determine for me" logic
+                             is still being worked out, so this stays a manual
+                             pick from what's actually available for now). -->
+                        <div id="dcMultiAutoDomestic" style="display:none">
+                            <div class="form-row">
+                                <button class="btn btn-primary btn-sm" id="btnLoadDcCounts">
+                                    <i class="fas fa-search"></i> Load Available DC Counts
+                                </button>
+                            </div>
+                            <div id="dcCountResult" style="display:none;margin-top:12px">
+                                <div id="dcCountSummary" style="margin-bottom:10px"></div>
+                                <div class="dc-count-checks" id="dcCountChecks"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="dcSelectionConfirmBox" style="margin-top:12px">
+                        <button class="btn btn-sm" id="btnDeleteDcCostModel" style="display:none;background:#dc3545;color:#fff;font-size:.68rem;padding:6px 12px">
+                            <i class="fas fa-rotate"></i> Replace Previous Upload
+                        </button>
+                        <div id="dcSelectionSubmitStatus" style="margin-top:10px"></div>
                     </div>
                 </div>
 
@@ -490,12 +608,12 @@
                     <div class="form-row">
                         <label><i class="fas fa-building"></i> Treat bulk counterparts the same?</label>
                         <div style="display:flex;gap:10px;margin-top:6px">
-                            <button class="btn btn-sm btn-primary" id="btnCampusYes">Yes</button>
-                            <button class="btn btn-sm btn-secondary" id="btnCampusNo">No</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnCampusYes" style="width:auto;padding:6px 16px;font-size:.88rem">Yes</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnCampusNo" style="width:auto;padding:6px 16px;font-size:.88rem">No</button>
                         </div>
                     </div>
                     <div id="campusSelection" style="display:none;margin-top:12px">
-                        <label style="margin-bottom:8px;display:block">Select campus pairs to merge:</label>
+                        <label style="margin-bottom:8px;display:block;font-size:.76rem;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--hd-medium-gray)">Select campus pairs to merge:</label>
                         <div style="display:flex;gap:10px;flex-wrap:wrap">
                             <button class="btn btn-sm dc-toggle-btn" id="btnCampusPerris" data-campus="perris" style="width:auto;padding:6px 16px">Perris</button>
                             <button class="btn btn-sm dc-toggle-btn" id="btnCampusLG" data-campus="locust_grove" style="width:auto;padding:6px 16px">Locust Grove</button>
@@ -510,27 +628,14 @@
                     <div class="form-row">
                         <label><i class="fas fa-filter"></i> Do you know which DCs to include or exclude?</label>
                         <div style="display:flex;gap:10px;margin-top:6px">
-                            <button class="btn btn-sm btn-primary" id="btnDcFilterYes">Yes</button>
-                            <button class="btn btn-sm btn-secondary" id="btnDcFilterNo">No</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnDcFilterYes" style="width:auto;padding:6px 16px;font-size:.88rem">Yes</button>
+                            <button class="btn btn-sm dc-toggle-btn" id="btnDcFilterNo" style="width:auto;padding:6px 16px;font-size:.88rem">No</button>
                         </div>
                     </div>
                     <div id="dcFilterSelection" style="display:none;margin-top:12px">
-                        <label style="margin-bottom:8px;display:block;font-size:.72rem;font-weight:400;text-transform:none;letter-spacing:normal;color:var(--hd-medium-gray)">Click to include → exclude → clear:</label>
+                        <label style="margin-bottom:8px;display:block;font-size:.76rem;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--hd-medium-gray)">Click to include → exclude → clear:</label>
                         <div class="dc-filter-list" id="dcFilterList"></div>
                         <div id="dcFilterNotice" style="display:none;margin-top:10px;padding:10px 14px;border-radius:6px;background:#d4edda;border:1px solid #28a745;font-size:0.85rem"></div>
-                    </div>
-                </div>
-
-                <!-- Cascading Assortments -->
-                <div class="param-group" id="paramsCascading" style="display:none;margin-top:20px;border-top:1px solid var(--hd-light-gray);padding-top:16px">
-                    <div class="form-row">
-                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                            <input type="checkbox" id="cascadingToggle" checked />
-                            <strong>Cascading Assortments</strong>
-                        </label>
-                        <span style="font-size:0.8rem;color:var(--hd-medium-gray);margin-top:2px;display:block">
-                            Each tier's DCs are a subset of the next larger tier
-                        </span>
                     </div>
                 </div>
             </div>
@@ -556,6 +661,10 @@
                 <button class="btn btn-sm btn-secondary" id="btnRedetermineAsmt"><i class="fas fa-rotate"></i> Redetermine</button>
             </div>
             <div id="asmtUnmappedWarning" style="display:none;margin-bottom:14px;padding:10px 14px;border-radius:6px;background:#f8d7da;border:1px solid #dc3545;color:#721c24;font-size:0.85rem"></div>
+            <div style="margin-bottom:14px">
+                <button class="btn btn-sm btn-secondary" id="btnCheckProblemSkus"><i class="fas fa-flag"></i> Check Problem SKUs</button>
+                <div id="problemSkuResults" style="display:none;margin-top:10px"></div>
+            </div>
             <div id="vendorChartContainerResults" style="display:none;max-width:400px;margin:0 auto 20px">
                 <canvas id="vendorPieChartResults"></canvas>
             </div>
@@ -680,6 +789,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
-    <script src="/static/js/app.js?v=328"></script>
+    <script src="/static/js/app.js?v=331"></script>
 </body>
 </html>

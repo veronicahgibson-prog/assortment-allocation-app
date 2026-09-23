@@ -35,6 +35,16 @@ FINAL_ALLOCATIONS = f"`{PROJECT_ID}.{TEMP_DATASET}.FINAL_ALLOCATIONS_WIDE`"
 UNALLOCATED_RECORDS = f"`{PROJECT_ID}.{TEMP_DATASET}.UNALLOCATED_RECORDS`"
 FACTORY_UTILIZATION = f"`{PROJECT_ID}.{TEMP_DATASET}.FACTORY_UTILIZATION`"
 SCHN_SKU_ATTR = "`pr-edw-views-thd.SCHN_CURATED.SCHN_SKU_ATTR`"
+# Combo-type lookup (e.g. "VAS - Blind") used only to force a BULK stocking
+# type classification for certain vendor value-add setups — see
+# api_classify_stock_type in app.py.
+DF_SKU_COMBO_CLT = "`analytics-supplychain-thd.DF_IPR_BI.DF_SKU_COMBO_CLT`"
+
+# MULTI_DC ladder flow: SKUs the winning (or campus-merged) assortment at a
+# factory's chosen tier still didn't price, and the lightweight procedure that
+# reroutes one to its own independent assortment without rerunning the ladder.
+ASSORTMENT_DC_COVERAGE_GAPS = f"`{PROJECT_ID}.{TEMP_DATASET}.ASSORTMENT_DC_COVERAGE_GAPS`"
+RESOLVE_PROBLEM_SKU_PROC = f"`{PROJECT_ID}.{DATASET}.resolve_problem_sku_override`"
 
 CONTAINER_DIVISOR = 2390
 DEFAULT_FALLBACK_ASMT_ID = 216050
@@ -118,7 +128,6 @@ DC_NAMES = {
     5857: "Tracy",
     5860: "Atlanta",
     5882: "Boston",
-    5938: "Mexico, MO",
     6006: "Perris Bulk",
     6007: "Perris",
     6705: "Locust Grove Bulk",

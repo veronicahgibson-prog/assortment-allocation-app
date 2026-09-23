@@ -308,6 +308,45 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
     """, job_config=detail_job_config).result())
     dc_counts_by_key = [r.DC_COUNT for r in key_dc_count_rows]
 
+    # Cascading: whether every key's DC set is a subset of the largest tier's
+    # DC set — e.g. a 2-DC key using {5823,6006} and a 1-DC key using {6006}
+    # both nest inside a 5-DC key's {5823,5854,6006,6705,6707}. Only
+    # meaningful with more than one distinct count (dc_counts_by_key); with
+    # just one, there's no smaller tier to violate it, so this comes back
+    # trivially True and the frontend never surfaces it anyway (the
+    # "Cascading Assortments" toggle only shows when multiple counts are
+    # selected). max_dc_count can legitimately be shared by more than one
+    # distinct DC combination (e.g. two different 5-DC keys picking different
+    # buildings) — REF_SET is the union of all of them, the most permissive
+    # reasonable reference rather than picking one arbitrarily.
+    is_cascading = None
+    if len(dc_counts_by_key) > 1:
+        cascading_rows = list(client.query(f"""
+            WITH factory_dc AS (
+              SELECT THD_SKU_NBR, SKU_NBR, FACTORY_ID, SUPPLIER, SKU_DESC, BP, LOAD_IN_UNITS,
+                     {_CAMPUS_NORMALIZE_CASE} AS NORMALIZED_DC_NBR
+              FROM {HISTORY_TABLE}
+              WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
+            ),
+            per_key AS (
+              SELECT {_thd_key_expr} AS THD_KEY,
+                     COUNT(DISTINCT NORMALIZED_DC_NBR) AS DC_COUNT,
+                     ARRAY_AGG(DISTINCT NORMALIZED_DC_NBR) AS DC_SET
+              FROM factory_dc
+              GROUP BY THD_KEY
+            ),
+            ref_set AS (
+              SELECT ARRAY_AGG(DISTINCT dc) AS REF_SET
+              FROM per_key, UNNEST(DC_SET) AS dc
+              WHERE DC_COUNT = (SELECT MAX(DC_COUNT) FROM per_key)
+            )
+            SELECT LOGICAL_AND(
+                     (SELECT LOGICAL_AND(dc IN UNNEST(r.REF_SET)) FROM UNNEST(p.DC_SET) AS dc)
+                   ) AS IS_CASCADING
+            FROM per_key p, ref_set r
+        """, job_config=detail_job_config).result())
+        is_cascading = bool(cascading_rows[0].IS_CASCADING) if cascading_rows else None
+
     # Evidence for the campus-merge guess used when PERRIS_CAMPUS_MERGED/
     # LG_CAMPUS_MERGED is NULL (never recorded): whether any single
     # key's own RAW (pre-fold) DC list contains *both* the bulk and main DC of
@@ -446,21 +485,42 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
             "thd_key_count": row["thd_key_count"],
         } for dc_list, row in sorted(by_dc_list.items(), key=lambda kv: (-kv[1]["dc_count"], kv[1]["vendors"]))]
     elif strategy_type:
-        asmt_rows = client.query(f"""
-            SELECT ASMT_ID AS asmt_id,
-                   COUNT(DISTINCT DC_NBR) AS dc_count,
-                   ARRAY_TO_STRING(ARRAY_AGG(DISTINCT CAST(DC_NBR AS STRING) ORDER BY CAST(DC_NBR AS STRING)), ', ') AS dc_list
-            FROM {HISTORY_TABLE}
-            WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
-              AND ASMT_ID IS NOT NULL
-            GROUP BY ASMT_ID
-            ORDER BY ASMT_ID
+        # ASMT_ID is NULL on every backfilled row (only ever set once the
+        # assortment tool has actually run for this event since this app
+        # started writing it), so grouping by ASMT_ID here came back empty for
+        # any historical event — which is most of them. Group by each key's
+        # actual (campus-normalized) DC set instead — the same distinct-DC-list
+        # breakdown dc_counts_by_key/is_cascading are already computed from —
+        # so this always has something to show, and it directly reflects how
+        # many keys actually used the same DC count/DC number combination.
+        dc_list_rows = client.query(f"""
+            WITH factory_dc AS (
+              SELECT THD_SKU_NBR, SKU_NBR, FACTORY_ID, SUPPLIER, SKU_DESC, BP, LOAD_IN_UNITS,
+                     {_CAMPUS_NORMALIZE_CASE} AS NORMALIZED_DC_NBR
+              FROM {HISTORY_TABLE}
+              WHERE UPPER(EVENT_NAME) = @event_name AND EVENT_YEAR = @year {is_import_filter}
+            ),
+            per_key AS (
+              SELECT {_thd_key_expr} AS THD_KEY,
+                     COUNT(DISTINCT NORMALIZED_DC_NBR) AS DC_COUNT,
+                     ARRAY_TO_STRING(
+                       ARRAY_AGG(DISTINCT CAST(NORMALIZED_DC_NBR AS STRING) ORDER BY CAST(NORMALIZED_DC_NBR AS STRING)),
+                       ', '
+                     ) AS DC_LIST
+              FROM factory_dc
+              GROUP BY THD_KEY
+            )
+            SELECT DC_COUNT, DC_LIST, COUNT(*) AS NUM_KEYS
+            FROM per_key
+            GROUP BY DC_COUNT, DC_LIST
+            ORDER BY DC_COUNT, DC_LIST
         """, job_config=detail_job_config).result()
         strategy_summary = [{
-            "asmt_id": r.asmt_id,
-            "dc_count": r.dc_count,
-            "dc_list": r.dc_list,
-        } for r in asmt_rows]
+            "dc_count": r.DC_COUNT,
+            "dc_list": r.DC_LIST,
+            "dc_name_list": ", ".join(_dc_name(int(d)) for d in r.DC_LIST.split(", ")) if r.DC_LIST else "",
+            "num_keys": r.NUM_KEYS,
+        } for r in dc_list_rows]
 
     by_dc_rows = list(client.query(f"""
         SELECT DC_NBR, ANY_VALUE(DC_NAME) AS DC_NAME,
@@ -617,6 +677,10 @@ def fetch_prior_year_strategy(client: bigquery.Client, event_name: str, max_year
             # one campus, just that nothing in the count depends on it.
             "perris_cooccurs_evidence": perris_cooccurs_evidence,
             "locust_grove_cooccurs_evidence": lg_cooccurs_evidence,
+            # None when dc_counts_by_key has only one value (nothing to test
+            # cascading against); otherwise True/False from the actual
+            # per-key subset check above.
+            "is_cascading": is_cascading,
         },
         "tier_strategy": tier_strategy,
         "strategy_summary": strategy_summary,

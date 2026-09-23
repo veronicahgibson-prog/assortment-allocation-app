@@ -149,6 +149,16 @@ table.prior-strategy-dc-table {
 .prior-strategy-dc-table td:first-child { font-weight: 700; text-align: left; }
 .prior-strategy-dc-table tbody tr:nth-child(even) { background: #fbf7f4; }
 
+/* DC Details (DC Count / DC Names / DC List / Total SKUs) reuses the orange
+   By DFC table look, but its middle columns hold long comma-separated DC
+   names/numbers — an equal-fourths fixed layout with a bold, left-aligned
+   first column (built for a short DFC name) squeezes those unreadably, so
+   it needs its own column rules instead. */
+.prior-strategy-dc-table.dc-details-table { table-layout: auto; }
+.prior-strategy-dc-table.dc-details-table td:first-child { font-weight: 400; text-align: center; }
+.prior-strategy-dc-table.dc-details-table td:nth-child(2),
+.prior-strategy-dc-table.dc-details-table td:nth-child(3) { text-align: left; }
+
 /* ── Wizard Stepper ───────────────────────────────────────────── */
 .stepper-section {
   max-width: 1100px; margin: 16px auto 0; padding: 0 24px;
@@ -295,7 +305,8 @@ table.prior-strategy-dc-table {
   display: flex; flex-direction: column; gap: 4px;
 }
 .strategy-card strong {
-  font-size: .88rem; color: var(--hd-dark-gray);
+  font-size: .76rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .4px; color: #000;
 }
 .strategy-card span {
   font-size: .76rem; color: var(--hd-medium-gray);
@@ -304,6 +315,39 @@ table.prior-strategy-dc-table {
   border-color: var(--hd-orange);
   background: rgba(249,99,2,.04);
   box-shadow: 0 0 0 1px var(--hd-orange);
+}
+
+/* Bulk/Parcel segment tabs — the shared strategy controls below belong to
+   whichever tab is .active; deliberately styled as heavy, unmissable cards
+   (not small buttons) since this switches what the whole card below means. */
+.segment-tabs {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px;
+}
+.segment-tab {
+  cursor: pointer; border: 2px solid var(--hd-light-gray); border-radius: var(--radius);
+  padding: 12px 16px; background: #fff; transition: var(--transition);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  text-align: left; font: inherit;
+}
+.segment-tab:hover { border-color: var(--hd-orange); }
+.segment-tab-label { display: flex; flex-direction: column; gap: 2px; }
+.segment-tab-name { font-size: .92rem; font-weight: 700; color: var(--hd-dark-gray); }
+.segment-tab-count { font-size: .76rem; color: var(--hd-medium-gray); }
+.segment-tab-status {
+  font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .02em;
+  padding: 3px 9px; border-radius: 12px; white-space: nowrap;
+  background: var(--hd-light-gray); color: var(--hd-medium-gray);
+}
+.segment-tab-status.done { background: var(--hd-green-light); color: var(--hd-green); }
+.segment-tab.active {
+  border-color: var(--hd-orange); background: rgba(249,99,2,.04);
+  box-shadow: 0 0 0 1px var(--hd-orange);
+}
+.segment-tab.active .segment-tab-name { color: var(--hd-orange-dark); }
+.segment-active-banner {
+  margin-top: 14px; margin-bottom: -6px; padding: 8px 14px;
+  background: var(--hd-orange); color: #fff; border-radius: var(--radius);
+  font-size: .82rem; font-weight: 700; display: flex; align-items: center; gap: 8px;
 }
 
 /* DC count toggle buttons */
@@ -325,6 +369,24 @@ table.prior-strategy-dc-table {
   border-color: var(--hd-orange);
   background: var(--hd-orange);
   color: #fff;
+}
+
+/* Step 2 "Define Strategy & Eligible DC Network" card — every button's
+   label text is deliberately smaller than the question labels (.76rem)
+   it's answering. Toggle-style buttons (dc-toggle-btn: Yes/No, Perris/
+   Locust Grove, Single/Multi-DC Count, the count grid) keep their own
+   white-until-selected/orange-when-active coloring, since that's the
+   actual selection signal — only the plain action buttons (Download,
+   Cancel, Confirm, Add/Save/Delete Vendor Strategy, Load DC Counts, etc.)
+   switch from gray to orange here. */
+#defineStrategyCard .btn {
+  font-size: .68rem;
+}
+#defineStrategyCard .btn-secondary {
+  background: var(--hd-orange); color: #fff;
+}
+#defineStrategyCard .btn-secondary:hover:not(:disabled) {
+  background: var(--hd-orange-dark);
 }
 
 .vendor-reconcile-card { margin-bottom: 16px; }
@@ -482,6 +544,16 @@ table.prior-strategy-dc-table {
 }
 .vendor-sku-override {
   margin-left: 8px; color: var(--hd-orange); font-size: .72rem; font-weight: 600;
+}
+/* Flashed on a SKU row after Step 3's DC eligibility fix sends the user back
+   here, so the corrected row is easy to spot among everything else on the
+   page instead of just scrolling into view unannounced. */
+.vendor-sku-row-flash {
+  animation: skuRowFlash 2s ease-out;
+}
+@keyframes skuRowFlash {
+  0% { background: #fff3cd; }
+  100% { background: transparent; }
 }
 
 #step1EventNameSelect option.new-event-option {
@@ -652,22 +724,44 @@ table.prior-strategy-dc-table {
 /* ── Factory Distribution bar chart ──────────────────────────────── */
 .chart-scroll { -webkit-overflow-scrolling: touch; }
 .chart-bar { fill: var(--hd-blue); cursor: pointer; }
+/* Flags a factory below the currently-selected min DC count's container
+   threshold (see renderLowVolumeAlert/applyLowVolumeChartHighlight in
+   app.js) — same yellow as that alert box, so the specific factory is
+   visible on the chart itself, not just counted in a summary line. Placed
+   before :hover/.is-active below so hovering still shows the orange
+   interactive state on top of a flagged bar/dot. */
+.chart-bar.chart-mark-low-vol { fill: #ffc107; }
 .chart-bar:hover, .chart-bar:focus, .chart-bar.is-active {
   fill: var(--hd-orange);
   outline: none;
 }
 .chart-bar-count-label {
-  font-size: 9px;
+  font-size: 12px;
   fill: var(--hd-medium-gray);
   font-variant-numeric: tabular-nums;
   text-anchor: middle;
 }
+/* Container dot-plot (waffle grid): one square dot per container, wrapped
+   into a fixed-width grid instead of one tall column so a 50+ container
+   factory stays as readable as a 2-container one. */
+.chart-dot-hit { fill: transparent; cursor: pointer; pointer-events: all; }
+.chart-dot { fill: var(--hd-blue); }
+.chart-dot-partial-bg { fill: var(--hd-bg); stroke: var(--hd-light-gray); stroke-width: 1; }
+.chart-dot-partial-fill { fill: var(--hd-blue); }
+.chart-dot-group.chart-mark-low-vol .chart-dot,
+.chart-dot-group.chart-mark-low-vol .chart-dot-partial-fill {
+  fill: #ffc107;
+}
+.chart-dot-group.is-active .chart-dot,
+.chart-dot-group.is-active .chart-dot-partial-fill {
+  fill: var(--hd-orange);
+}
 .chart-axis-tick-label {
-  font-size: 9px;
+  font-size: 12px;
   fill: #888;
 }
 .chart-y-tick-label {
-  font-size: 9px;
+  font-size: 12px;
   fill: #888;
   text-anchor: end;
 }
@@ -678,7 +772,7 @@ table.prior-strategy-dc-table {
   z-index: 500;
   background: var(--hd-black);
   color: #fff;
-  font-size: .72rem;
+  font-size: .88rem;
   line-height: 1.5;
   padding: 6px 10px;
   border-radius: 6px;
